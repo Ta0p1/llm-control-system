@@ -1,0 +1,32 @@
+# Python caches and build artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Local app data and indexes
+data/
+*.db
+*.sqlite
+*.sqlite3
+
+# Local course materials and generated knowledge assets
+knowledge/
+
+# Environment and secrets
+.env
+.env.*
+
+# IDE and OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
