@@ -5,6 +5,7 @@ import io
 import json
 import math
 import re
+from time import perf_counter
 from typing import Any, TypedDict
 
 import sympy
@@ -22,12 +23,20 @@ except ImportError:  # pragma: no cover - fallback stays available if dependency
     END = "__end__"
     StateGraph = None
 
-from app.config import PRIMARY_COLLECTIONS, VERIFICATION_COLLECTIONS, VISION_MODEL
+from app.config import (
+    ANSWER_NUM_PREDICT,
+    PLAN_NUM_PREDICT,
+    PRIMARY_COLLECTIONS,
+    REVIEW_NUM_PREDICT,
+    VERIFICATION_COLLECTIONS,
+    VISION_MODEL,
+)
 from app.extractors import extract_problem_id
 from app.knowledge_store import KnowledgeStore
 from app.ollama_client import OllamaClient
 from app.runtime import build_runtime_profile
 from app.schemas import (
+    ChatTiming,
     ChatResponse,
     Citation,
     EvidenceGroup,
@@ -58,6 +67,55 @@ Before finalizing a solve answer, perform a global consistency check:
 - the final summary must not contradict earlier derivations
 """
 
+PLANNING_SYSTEM_PROMPT = """You are an offline control systems planning assistant.
+Default to English.
+Return concise structured outputs only.
+Do not explain at length.
+Choose tools only when they clearly help verify a key quantity.
+"""
+
+IMAGE_PARSE_SYSTEM_PROMPT = """Extract control-systems problem content from images.
+Return strict JSON only.
+Do not guess unclear symbols; list them under unclear_items.
+Keep every field concise.
+"""
+
+CONCEPT_ANSWER_PROMPT = """Answer the question in {language} using the retrieved theory evidence.
+Keep the answer concise but complete.
+Write normal text, not JSON.
+Use source markers like [1], [2] and end with a short Sources section.
+"""
+
+SOLVE_ANSWER_PROMPT = """Answer in {language} with these sections only:
+Problem Restatement
+Knowns / Unknowns
+Theory Used
+Step-by-Step Solution
+Final Answer
+Sources
+
+Be concise.
+Use source markers like [1], [2] and list them in the Sources section.
+Use verification evidence only as a checking layer.
+Do not repeat the same evidence in multiple sections.
+Write normal text, not JSON.
+"""
+
+
+class PipelineExecutionError(RuntimeError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        stage_timings: dict[str, float],
+        model_calls: dict[str, float],
+        timing_metadata: dict[str, Any],
+    ) -> None:
+        super().__init__(message)
+        self.stage_timings = stage_timings
+        self.model_calls = model_calls
+        self.timing_metadata = timing_metadata
+
 
 class WorkflowState(TypedDict, total=False):
     question: str
@@ -83,6 +141,9 @@ class WorkflowState(TypedDict, total=False):
     citations: list[Citation]
     evidence_groups: list[EvidenceGroup]
     verification_result: VerificationResult
+    stage_timings: dict[str, float]
+    model_calls: dict[str, float]
+    timing_metadata: dict[str, Any]
 
 
 class ControlSystemAssistant:
@@ -110,10 +171,24 @@ class ControlSystemAssistant:
             "images": normalize_images(images or []),
             "image_names": image_names or [],
             "model_name": runtime_profile.recommended_model,
+            "primary_hits": [],
+            "verification_hits": [],
             "used_tools": [],
             "verification_result": VerificationResult(),
+            "stage_timings": {},
+            "model_calls": {},
+            "timing_metadata": {
+                "image_count": len(images or []),
+                "verification_used": False,
+                "review_used": False,
+                "tool_count": 0,
+                "primary_hit_count": 0,
+                "verification_hit_count": 0,
+            },
         }
+        request_started = perf_counter()
         state = self._invoke_graph(initial_state)
+        state["timing_metadata"]["total_duration_ms"] = round((perf_counter() - request_started) * 1000, 2)
         return ChatResponse(
             answer=state["answer"],
             steps=state["solve_plan"].solution_outline or default_steps(state["mode"], preferred_language),
@@ -124,6 +199,12 @@ class ControlSystemAssistant:
             retrieval_plan=state["retrieval_plan"],
             verification_used=state["verification_result"].used,
             evidence_groups=state["evidence_groups"],
+            timing=ChatTiming(
+                total_duration_ms=state["timing_metadata"]["total_duration_ms"],
+                stage_timings=state["stage_timings"],
+                model_calls=state["model_calls"],
+                metadata=state["timing_metadata"],
+            ),
         )
 
     def _build_graph(self):
@@ -148,19 +229,52 @@ class ControlSystemAssistant:
         return graph.compile()
 
     def _invoke_graph(self, initial_state: WorkflowState) -> WorkflowState:
-        if self.graph is not None:
-            return self.graph.invoke(initial_state)
         state = dict(initial_state)
-        for node in (
-            self._classify_node,
-            self._parse_images_node,
-            self._retrieve_primary_node,
-            self._build_plan_node,
-            self._run_tools_node,
-            self._retrieve_verification_node,
-            self._compose_answer_node,
-        ):
-            state.update(node(state))
+        stage_sequence = [
+            ("classify", self._classify_node),
+            ("parse_images", self._parse_images_node),
+            ("retrieve_primary", self._retrieve_primary_node),
+        ]
+        for stage_name, node in stage_sequence:
+            started = perf_counter()
+            try:
+                state.update(node(state))
+            except Exception as exc:
+                state["stage_timings"][stage_name] = round((perf_counter() - started) * 1000, 2)
+                state["timing_metadata"]["failed_stage"] = stage_name
+                raise PipelineExecutionError(
+                    str(exc),
+                    stage_timings=dict(state["stage_timings"]),
+                    model_calls=dict(state["model_calls"]),
+                    timing_metadata=dict(state["timing_metadata"]),
+                ) from exc
+            state["stage_timings"][stage_name] = round((perf_counter() - started) * 1000, 2)
+        if state.get("mode") == "solve":
+            state["timing_metadata"]["path_type"] = "image_standard" if state.get("images") else "standard"
+            remaining_stages = [
+                ("build_plan", self._build_plan_node),
+                ("run_tools", self._run_tools_node),
+                ("retrieve_verification", self._retrieve_verification_node),
+                ("compose_answer", self._compose_answer_node),
+            ]
+        else:
+            state["timing_metadata"]["path_type"] = "fast"
+            remaining_stages = [("compose_answer", self._compose_answer_node)]
+        for stage_name, node in remaining_stages:
+            started = perf_counter()
+            try:
+                state.update(node(state))
+            except Exception as exc:
+                state["stage_timings"][stage_name] = round((perf_counter() - started) * 1000, 2)
+                state["timing_metadata"]["failed_stage"] = stage_name
+                raise PipelineExecutionError(
+                    str(exc),
+                    stage_timings=dict(state["stage_timings"]),
+                    model_calls=dict(state["model_calls"]),
+                    timing_metadata=dict(state["timing_metadata"]),
+                ) from exc
+            state["stage_timings"][stage_name] = round((perf_counter() - started) * 1000, 2)
+        state["timing_metadata"]["total_stage_count"] = len(stage_sequence) + len(remaining_stages)
         return state
 
     def _classify_node(self, state: WorkflowState) -> WorkflowState:
@@ -187,23 +301,33 @@ class ControlSystemAssistant:
     def _parse_images_node(self, state: WorkflowState) -> WorkflowState:
         if not state["images"]:
             return {"image_summary": ""}
+        start = perf_counter()
         prompt = f"""
-Extract the control-systems problem information from the attached image(s).
-Return plain English text only.
-Capture visible question text, variables, labels, transfer functions, block connections, and any graph or table clues.
-If a symbol is unclear, say it is unclear instead of guessing.
-User question:
-{state['question']}
+Return strict JSON with these fields only:
+- question_text: string
+- symbols: array of strings
+- transfer_functions: array of strings
+- diagram_clues: array of strings
+- unclear_items: array of strings
+
+Extract only visible control-systems information from the attached image(s).
+User question: {state['question']}
 """
         image_message: dict[str, Any] = {"role": "user", "content": prompt, "images": state["images"]}
-        image_summary = self.ollama.chat(
-            VISION_MODEL,
-            [
-                {"role": "system", "content": "Read the image carefully and extract problem content in English."},
-                image_message,
-            ],
-        )
+        try:
+            raw_summary = self.ollama.chat(
+                VISION_MODEL,
+                [
+                    {"role": "system", "content": IMAGE_PARSE_SYSTEM_PROMPT},
+                    image_message,
+                ],
+                json_output=True,
+            )
+        finally:
+            state["model_calls"]["parse_images_model_ms"] = round((perf_counter() - start) * 1000, 2)
         used_tools = sorted(set([*state["used_tools"], "vision"]))
+        image_summary = compress_image_summary(raw_summary)
+        state["timing_metadata"]["image_summary_chars"] = len(image_summary)
         return {"image_summary": image_summary, "used_tools": used_tools}
 
     def _retrieve_primary_node(self, state: WorkflowState) -> WorkflowState:
@@ -227,6 +351,7 @@ User question:
             "problem_id": state.get("problem_id_hint"),
         }
         retrieval_plan.stages.append("retrieve_primary")
+        state["timing_metadata"]["primary_hit_count"] = len(primary_hits)
         return {
             "primary_hits": primary_hits,
             "retrieval_plan": retrieval_plan,
@@ -242,20 +367,20 @@ User question:
                 )
             }
 
-        context = render_context(state["primary_hits"], limit=4, max_chars=850)
+        context = render_context(state["primary_hits"], limit=2, max_chars=280)
         planning_prompt = f"""
 Return strict JSON only.
 
-Language for all strings: {state['preferred_language']}.
+Language: {state['preferred_language']}.
 
 Fields:
 - mode: always solve
 - problem_restatement: string
 - knowns: array of strings
 - targets: array of strings
-- method: string
-- solution_outline: array of strings
-- formulas: array of strings
+- method: short string
+- solution_outline: array of at most 4 short strings
+- formulas: array of at most 4 short strings
 - tool_requests: array using these tool types only:
   1. second_order_metrics with zeta, wn
   2. solve_equation with equation, variable, substitutions
@@ -268,17 +393,25 @@ User question:
 Image summary:
 {state.get('image_summary', '') or 'No image summary.'}
 
-Retrieved theory/problem context:
+Retrieved context:
 {context}
 """
-        raw = self.ollama.chat(
-            state["model_name"],
-            [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": planning_prompt},
-            ],
-            json_output=True,
-        )
+        model_started = perf_counter()
+        try:
+            plan_options: dict[str, Any] = {"temperature": 0}
+            if PLAN_NUM_PREDICT is not None:
+                plan_options["num_predict"] = PLAN_NUM_PREDICT
+            raw = self.ollama.chat(
+                state["model_name"],
+                [
+                    {"role": "system", "content": PLANNING_SYSTEM_PROMPT},
+                    {"role": "user", "content": planning_prompt},
+                ],
+                json_output=True,
+                options=plan_options,
+            )
+        finally:
+            state["model_calls"]["build_plan_model_ms"] = round((perf_counter() - model_started) * 1000, 2)
         try:
             solve_plan = SolvePlan.model_validate(self.ollama.parse_json(raw))
         except Exception:
@@ -295,6 +428,7 @@ Retrieved theory/problem context:
             return {"tool_results": []}
         tool_results, tool_names = run_tool_requests(state["solve_plan"].tool_requests)
         used_tools = sorted(set([*state["used_tools"], *tool_names]))
+        state["timing_metadata"]["tool_count"] = len(tool_results)
         return {"tool_results": tool_results, "used_tools": used_tools}
 
     def _retrieve_verification_node(self, state: WorkflowState) -> WorkflowState:
@@ -317,6 +451,8 @@ Retrieved theory/problem context:
             prefer_pair_keys=preferred_pairs,
         )
         retrieval_plan.stages.append("retrieve_verification")
+        state["timing_metadata"]["verification_used"] = bool(verification_hits)
+        state["timing_metadata"]["verification_hit_count"] = len(verification_hits)
         verification_result = VerificationResult(
             used=bool(verification_hits),
             summary="Verification used official worked solutions." if verification_hits else "No matching solution verification was retrieved.",
@@ -330,52 +466,71 @@ Retrieved theory/problem context:
         }
 
     def _compose_answer_node(self, state: WorkflowState) -> WorkflowState:
-        primary_context = render_context(state["primary_hits"], limit=4, max_chars=900)
-        verification_context = render_context(state["verification_hits"], limit=3, max_chars=750)
-        tool_summary = json.dumps(state.get("tool_results", []), ensure_ascii=False, indent=2)
+        if state["mode"] == "concept":
+            primary_hits = [hit for hit in state["primary_hits"] if hit.unit.source_family in {"theory_gold", "notes_silver"}]
+            primary_context = render_context(primary_hits or state["primary_hits"], limit=2, max_chars=180)
+            verification_context = "Verification skipped for concept mode."
+            prompt_header = CONCEPT_ANSWER_PROMPT.format(language=state["preferred_language"])
+        else:
+            primary_context = render_context(state["primary_hits"], limit=2, max_chars=180)
+            verification_context = render_context(state["verification_hits"], limit=1, max_chars=120)
+            prompt_header = SOLVE_ANSWER_PROMPT.format(language=state["preferred_language"])
+        compact_plan = summarize_solve_plan(state["solve_plan"])
+        tool_summary = summarize_tool_results(state.get("tool_results", []))
+        compressed_context_chars = len(primary_context) + len(verification_context) + len(compact_plan) + len(tool_summary)
+        state["timing_metadata"]["compressed_context_chars"] = compressed_context_chars
         final_prompt = f"""
-Language target: {state['preferred_language']}
+{prompt_header}
+
 Question mode: {state['mode']}
 Learning mode: {state['chat_mode']}
+User question: {state['question']}
+Image summary: {state.get('image_summary', '') or 'No image summary.'}
 
-User question:
-{state['question']}
-
-Image summary:
-{state.get('image_summary', '') or 'No image summary.'}
-
-Primary evidence (theory, worked problems, silver notes, solved final references):
+Primary evidence:
 {primary_context}
 
-Verification evidence (official solutions):
+Verification evidence:
 {verification_context}
 
 Solve plan:
-{state['solve_plan'].model_dump_json(indent=2)}
+{compact_plan}
 
 Tool results:
 {tool_summary}
 
-Requirements:
-- Respond in {state['preferred_language']} unless the user explicitly asked otherwise.
-- Use the verification evidence only as a checking layer, not as the sole source of reasoning.
-- Clearly distinguish theory basis, problem similarity, recommended-solution verification, and final-solution references.
-- Run a final consistency pass before you answer:
-  - if poles have negative real parts, do not call the system unstable
-  - if a system is identified as type 2, step and ramp steady-state errors should be zero and parabolic error should be finite
-  - if you compute a dominant pole pair, the rise time, overshoot, and settling time must match that same pair
-  - the closing summary must agree with the derivation above it
-- If information is insufficient, state what is missing.
-- Use source markers like [1], [2] and list them in the Sources section.
+Hard consistency checks:
+- if poles have negative real parts, do not call the system unstable
+- if a system is type 2, step and ramp steady-state errors should be zero
+- dominant-pole metrics must match the same pole pair used in the derivation
+- the final summary must agree with the calculations above it
+- if information is insufficient, say exactly what is missing
+- do not output JSON, YAML, or code fences
 """
-        draft_answer = self.ollama.chat(
-            state["model_name"],
-            [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": final_prompt},
-            ],
+        answer_options: dict[str, Any] = {"temperature": 0.1}
+        if ANSWER_NUM_PREDICT is not None:
+            answer_options["num_predict"] = ANSWER_NUM_PREDICT
+        compose_started = perf_counter()
+        try:
+            raw_answer = self.ollama.chat(
+                state["model_name"],
+                [
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": final_prompt},
+                ],
+                options=answer_options,
+            )
+        finally:
+            state["model_calls"]["compose_answer_model_ms"] = round((perf_counter() - compose_started) * 1000, 2)
+        state["timing_metadata"]["compose_answer_empty"] = not bool(raw_answer.strip())
+        draft_answer = render_answer_output(
+            raw_answer,
+            mode=state["mode"],
+            preferred_language=state["preferred_language"],
+            question=state["question"],
+            solve_plan=state["solve_plan"],
         )
-        answer, review_used = review_and_revise_answer(
+        answer, review_used, review_ms = review_and_revise_answer(
             self.ollama,
             state["model_name"],
             preferred_language=state["preferred_language"],
@@ -390,6 +545,9 @@ Requirements:
         used_tools = state["used_tools"]
         if review_used:
             used_tools = sorted(set([*used_tools, "consistency-review"]))
+        state["timing_metadata"]["review_used"] = review_used
+        if review_ms > 0:
+            state["model_calls"]["review_and_revise_model_ms"] = review_ms
         return {
             "answer": answer,
             "citations": citations,
@@ -455,12 +613,23 @@ def render_context(hits: list[RetrievalHit], *, limit: int = 6, max_chars: int =
         return "No retrieved evidence."
 
     lines: list[str] = []
+    seen_signatures: set[tuple[str, str | None, int | None, str]] = set()
     for idx, hit in enumerate(hits[:limit], start=1):
+        signature = (
+            hit.unit.source_family,
+            hit.unit.problem_id,
+            hit.unit.page_or_slide,
+            hit.unit.excerpt[:120],
+        )
+        if signature in seen_signatures:
+            continue
+        seen_signatures.add(signature)
         page_or_slide = hit.unit.page_or_slide or "?"
+        excerpt = compact_text(hit.unit.text, max_chars)
         lines.append(
             f"[{idx}] family={hit.unit.source_family} file={hit.unit.file_path} "
             f"page_or_slide={page_or_slide} chapter={hit.unit.chapter or '-'} "
-            f"problem_id={hit.unit.problem_id or '-'} score={hit.score:.3f}\n{hit.unit.text[:max_chars]}"
+            f"problem_id={hit.unit.problem_id or '-'} score={hit.score:.3f}\n{excerpt}"
         )
     return "\n\n".join(lines)
 
@@ -517,14 +686,14 @@ def review_and_revise_answer(
     solve_plan: SolvePlan,
     draft_answer: str,
     tool_results: list[dict[str, Any]],
-) -> tuple[str, bool]:
+) -> tuple[str, bool, float]:
     if mode != "solve" or not draft_answer.strip():
-        return draft_answer, False
+        return draft_answer, False, 0.0
 
     patched_answer, patched = apply_deterministic_consistency_fixes(draft_answer, tool_results)
     heuristic_issues = detect_consistency_issues(patched_answer, tool_results)
-    if patched and not heuristic_issues:
-        return patched_answer, True
+    if not heuristic_issues:
+        return patched_answer, patched, 0.0
 
     review_prompt = f"""
 Return strict JSON only with these fields:
@@ -564,6 +733,10 @@ Draft answer:
 {patched_answer}
 """
     try:
+        review_started = perf_counter()
+        review_options: dict[str, Any] = {"temperature": 0}
+        if REVIEW_NUM_PREDICT is not None:
+            review_options["num_predict"] = REVIEW_NUM_PREDICT
         raw = ollama.chat(
             model_name,
             [
@@ -571,44 +744,20 @@ Draft answer:
                 {"role": "user", "content": review_prompt},
             ],
             json_output=True,
+            options=review_options,
         )
+        review_ms = round((perf_counter() - review_started) * 1000, 2)
         parsed = ollama.parse_json(raw)
         verdict = str(parsed.get("verdict", "ok")).strip().lower()
         revised_answer = str(parsed.get("revised_answer", "")).strip()
         if verdict == "revise" and revised_answer and not revision_looks_degraded(patched_answer, revised_answer):
-            return revised_answer, True
+            return revised_answer, True, review_ms
         if revised_answer and not revision_looks_degraded(patched_answer, revised_answer):
-            return revised_answer, False
+            return revised_answer, False, review_ms
     except Exception:
         pass
 
-    if heuristic_issues:
-        fallback_prompt = f"""
-Revise the following control-systems answer so that it is internally consistent.
-Keep the same structure and language ({preferred_language}).
-Fix contradictions only. Do not add new citations or new evidence.
-Prefer minimal edits, and do not replace correct values with placeholders.
-
-Issues to fix:
-{json.dumps(heuristic_issues, ensure_ascii=False, indent=2)}
-
-Answer:
-{patched_answer}
-"""
-        try:
-            revised_answer = ollama.chat(
-                model_name,
-                [
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": fallback_prompt},
-                ],
-            ).strip()
-            if revised_answer and not revision_looks_degraded(patched_answer, revised_answer):
-                return revised_answer, True
-        except Exception:
-            pass
-
-    return patched_answer, patched
+    return patched_answer, patched, 0.0
 
 
 def detect_consistency_issues(answer: str, tool_results: list[dict[str, Any]]) -> list[str]:
@@ -834,8 +983,10 @@ def normalize_images(images: list[str]) -> list[str]:
         try:
             raw = base64.b64decode(image_b64)
             with Image.open(io.BytesIO(raw)) as img:
+                img = img.convert("RGB")
                 width, height = img.size
                 min_size = 56
+                max_size = 1280
                 if width < min_size or height < min_size:
                     scale = max(min_size / max(width, 1), min_size / max(height, 1))
                     new_size = (
@@ -843,9 +994,275 @@ def normalize_images(images: list[str]) -> list[str]:
                         max(min_size, int(height * scale)),
                     )
                     img = img.resize(new_size)
+                    width, height = img.size
+                if width > max_size or height > max_size:
+                    img.thumbnail((max_size, max_size))
                 output = io.BytesIO()
                 img.save(output, format="PNG")
                 normalized.append(base64.b64encode(output.getvalue()).decode())
         except Exception:
             normalized.append(image_b64)
     return normalized
+
+
+def compact_text(text: str, max_chars: int) -> str:
+    squashed = re.sub(r"\s+", " ", text).strip()
+    if len(squashed) <= max_chars:
+        return squashed
+    return squashed[: max_chars - 3].rstrip() + "..."
+
+
+def compress_image_summary(raw_summary: str) -> str:
+    try:
+        payload = OllamaClient.parse_json(raw_summary)
+        question_text = compact_text(str(payload.get("question_text", "")).strip(), 320)
+        symbols = [compact_text(str(item), 60) for item in payload.get("symbols", [])[:6]]
+        transfer_functions = [compact_text(str(item), 90) for item in payload.get("transfer_functions", [])[:4]]
+        diagram_clues = [compact_text(str(item), 90) for item in payload.get("diagram_clues", [])[:5]]
+        unclear_items = [compact_text(str(item), 60) for item in payload.get("unclear_items", [])[:5]]
+        parts = [
+            f"question_text: {question_text or 'none'}",
+            f"symbols: {', '.join(symbols) if symbols else 'none'}",
+            f"transfer_functions: {', '.join(transfer_functions) if transfer_functions else 'none'}",
+            f"diagram_clues: {', '.join(diagram_clues) if diagram_clues else 'none'}",
+            f"unclear_items: {', '.join(unclear_items) if unclear_items else 'none'}",
+        ]
+        return "\n".join(parts)
+    except Exception:
+        return compact_text(raw_summary, 420)
+
+
+def summarize_solve_plan(plan: SolvePlan) -> str:
+    payload = {
+        "mode": plan.mode,
+        "problem_restatement": compact_text(plan.problem_restatement, 220),
+        "knowns": [compact_text(item, 80) for item in plan.knowns[:6]],
+        "targets": [compact_text(item, 80) for item in plan.targets[:4]],
+        "method": compact_text(plan.method, 140),
+        "solution_outline": [compact_text(item, 100) for item in plan.solution_outline[:4]],
+        "formulas": [compact_text(item, 100) for item in plan.formulas[:4]],
+        "tool_requests": plan.tool_requests[:3],
+    }
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+
+def summarize_tool_results(tool_results: list[dict[str, Any]]) -> str:
+    if not tool_results:
+        return "No tool results."
+    compact_results: list[dict[str, Any]] = []
+    for result in tool_results[:4]:
+        compact_result: dict[str, Any] = {}
+        for key, value in result.items():
+            if key in {"numerator", "denominator"}:
+                continue
+            if isinstance(value, str):
+                compact_result[key] = compact_text(value, 120)
+            elif isinstance(value, list):
+                compact_result[key] = [compact_text(str(item), 60) for item in value[:6]]
+            else:
+                compact_result[key] = value
+        compact_results.append(compact_result)
+    return json.dumps(compact_results, ensure_ascii=False, separators=(",", ":"))
+
+
+def render_answer_output(
+    raw_answer: str,
+    *,
+    mode: str,
+    preferred_language: str,
+    question: str,
+    solve_plan: SolvePlan,
+) -> str:
+    if not raw_answer.strip():
+        return build_fallback_answer(mode=mode, question=question, solve_plan=solve_plan)
+    if not looks_like_structured_output(raw_answer):
+        return normalize_plain_answer(raw_answer)
+    try:
+        payload = OllamaClient.parse_json(raw_answer)
+    except Exception:
+        salvaged = salvage_partial_answer(raw_answer)
+        if salvaged:
+            payload = salvaged
+        else:
+            fallback = compact_text(raw_answer, 2400)
+            if looks_like_structured_output(raw_answer):
+                return build_fallback_answer(mode=mode, question=question, solve_plan=solve_plan)
+            return fallback or build_fallback_answer(mode=mode, question=question, solve_plan=solve_plan)
+
+    answer_summary = compact_text(str(payload.get("answer_summary", "")).strip(), 600)
+    theory_used = [compact_text(str(item), 160) for item in payload.get("theory_used", [])[:4]]
+    step_by_step = [compact_text(str(item), 220) for item in payload.get("step_by_step_solution", [])[:6]]
+    final_answer = compact_text(str(payload.get("final_answer", "")).strip(), 500)
+    missing_info = [compact_text(str(item), 140) for item in payload.get("missing_info", [])[:4]]
+
+    if not any([answer_summary, theory_used, step_by_step, final_answer, missing_info]):
+        return build_fallback_answer(mode=mode, question=question, solve_plan=solve_plan)
+
+    if mode == "concept":
+        lines: list[str] = []
+        lines.append(answer_summary or compact_text(question, 300))
+        if theory_used:
+            lines.append("")
+            lines.append("Theory Used")
+            lines.extend(f"- {item}" for item in theory_used)
+        if missing_info:
+            lines.append("")
+            lines.append("Missing Information")
+            lines.extend(f"- {item}" for item in missing_info)
+        lines.append("")
+        lines.append("Sources")
+        lines.append("Use the cited local evidence listed below.")
+        return "\n".join(lines)
+
+    problem_restatement = solve_plan.problem_restatement or question
+    knowns = solve_plan.knowns[:6]
+    targets = solve_plan.targets[:4]
+    lines = [
+        "Problem Restatement",
+        compact_text(problem_restatement, 500),
+        "",
+        "Knowns / Unknowns",
+    ]
+    if knowns or targets:
+        if knowns:
+            lines.extend(f"- Known: {item}" for item in knowns)
+        if targets:
+            lines.extend(f"- Target: {item}" for item in targets)
+    else:
+        lines.append("- Not explicitly identified.")
+    lines.extend(["", "Theory Used"])
+    if theory_used:
+        lines.extend(f"- {item}" for item in theory_used)
+    else:
+        lines.append("- Use retrieved control-systems evidence and matched examples.")
+    lines.extend(["", "Step-by-Step Solution"])
+    if step_by_step:
+        lines.extend(f"{idx}. {item}" for idx, item in enumerate(step_by_step, start=1))
+    else:
+        lines.extend(f"{idx}. {item}" for idx, item in enumerate(solve_plan.solution_outline[:5], start=1))
+    lines.extend(["", "Final Answer", final_answer or answer_summary or "The result could not be stated confidently."])
+    if missing_info:
+        lines.extend(["", "Missing Information"])
+        lines.extend(f"- {item}" for item in missing_info)
+    lines.extend(["", "Sources", "Use the cited local evidence listed below."])
+    return "\n".join(lines)
+
+
+def build_fallback_answer(*, mode: str, question: str, solve_plan: SolvePlan) -> str:
+    if mode == "concept":
+        lines = [
+            compact_text(solve_plan.problem_restatement or question, 320),
+            "",
+            "Sources",
+            "Use the cited local evidence listed below.",
+        ]
+        return "\n".join(lines)
+
+    problem_restatement = compact_text(solve_plan.problem_restatement or question, 500)
+    method = compact_text(solve_plan.method or "Use the retrieved evidence to derive the result.", 180)
+    outline = solve_plan.solution_outline[:4] or default_steps("solve", "english")
+    lines = [
+        "Problem Restatement",
+        problem_restatement,
+        "",
+        "Knowns / Unknowns",
+    ]
+    if solve_plan.knowns or solve_plan.targets:
+        lines.extend(f"- Known: {item}" for item in solve_plan.knowns[:6])
+        lines.extend(f"- Target: {item}" for item in solve_plan.targets[:4])
+    else:
+        lines.append("- Not explicitly identified from the generated answer.")
+    lines.extend([
+        "",
+        "Theory Used",
+        f"- {method}",
+        "",
+        "Step-by-Step Solution",
+    ])
+    lines.extend(f"{idx}. {compact_text(item, 180)}" for idx, item in enumerate(outline, start=1))
+    lines.extend([
+        "",
+        "Final Answer",
+        "The model did not return a complete final statement, so this answer falls back to the extracted plan. Please use the cited sources below and, if needed, ask a narrower follow-up question.",
+        "",
+        "Sources",
+        "Use the cited local evidence listed below.",
+    ])
+    return "\n".join(lines)
+
+
+def normalize_plain_answer(text: str, max_chars: int = 6000) -> str:
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n").strip()
+    normalized = re.sub(r"\n{3,}", "\n\n", normalized)
+    if len(normalized) <= max_chars:
+        return normalized
+    return normalized[: max_chars - 3].rstrip() + "..."
+
+
+def looks_like_structured_output(text: str) -> bool:
+    stripped = text.lstrip()
+    return stripped.startswith("{") or '"answer_summary"' in stripped or '"final_answer"' in stripped
+
+
+def salvage_partial_answer(text: str) -> dict[str, Any] | None:
+    if not looks_like_structured_output(text):
+        return None
+
+    payload: dict[str, Any] = {}
+    for field in ("answer_summary", "final_answer"):
+        value = extract_partial_json_string(text, field)
+        if value:
+            payload[field] = value
+
+    for field in ("theory_used", "step_by_step_solution", "missing_info"):
+        items = extract_partial_json_array(text, field)
+        if items:
+            payload[field] = items
+
+    return payload or None
+
+
+def extract_partial_json_string(text: str, field: str) -> str:
+    marker = f'"{field}"'
+    start = text.find(marker)
+    if start == -1:
+        return ""
+    start = text.find(":", start)
+    if start == -1:
+        return ""
+    start = text.find('"', start)
+    if start == -1:
+        return ""
+    start += 1
+    chars: list[str] = []
+    escaped = False
+    for char in text[start:]:
+        if escaped:
+            chars.append(char)
+            escaped = False
+            continue
+        if char == "\\":
+            escaped = True
+            continue
+        if char == '"':
+            break
+        chars.append(char)
+    return compact_text("".join(chars).strip(), 600)
+
+
+def extract_partial_json_array(text: str, field: str) -> list[str]:
+    marker = f'"{field}"'
+    start = text.find(marker)
+    if start == -1:
+        return []
+    start = text.find("[", start)
+    if start == -1:
+        return []
+    end = text.find("]", start)
+    if end == -1:
+        segment = text[start + 1 :]
+    else:
+        segment = text[start + 1 : end]
+    matches = re.findall(r'"([^"]+)', segment)
+    cleaned = [compact_text(match.strip(), 220) for match in matches if match.strip()]
+    return cleaned[:6]

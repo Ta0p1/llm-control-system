@@ -15,6 +15,20 @@ FINAL_BATCHES_DIR = TEACHER_BATCHES_DIR / "finals"
 
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
 OLLAMA_TIMEOUT_SECONDS = int(os.getenv("OLLAMA_TIMEOUT_SECONDS", "600"))
+OLLAMA_DISABLE_THINKING = os.getenv("OLLAMA_DISABLE_THINKING", "1").lower() in {"1", "true", "yes"}
+
+
+def _optional_int_env(name: str, default: str = "") -> int | None:
+    value = os.getenv(name, default).strip()
+    if not value:
+        return None
+    parsed = int(value)
+    return parsed if parsed > 0 else None
+
+
+PLAN_NUM_PREDICT = _optional_int_env("PLAN_NUM_PREDICT", "")
+ANSWER_NUM_PREDICT = _optional_int_env("ANSWER_NUM_PREDICT", "")
+REVIEW_NUM_PREDICT = _optional_int_env("REVIEW_NUM_PREDICT", "")
 
 RUNTIME_MODEL = os.getenv("RUNTIME_MODEL", "qwen3.5:9b")
 DEV_CHAT_MODEL = os.getenv("DEV_CHAT_MODEL", RUNTIME_MODEL)

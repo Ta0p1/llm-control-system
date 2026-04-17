@@ -1,5 +1,4 @@
 from __future__ import annotations
-
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
@@ -18,7 +17,7 @@ from app.schemas import (
     IngestRequest,
     IngestResponse,
 )
-from app.solver import ControlSystemAssistant
+from app.solver import ControlSystemAssistant, PipelineExecutionError
 
 app = FastAPI(title="Offline Control System Assistant", version="0.2.0")
 
@@ -28,7 +27,7 @@ knowledge_store = assistant.store
 
 @app.get("/health", response_model=HealthResponse)
 def health() -> HealthResponse:
-    runtime = build_runtime_profile()
+    runtime = build_runtime_profile(refresh=True)
     return HealthResponse(
         status="ok",
         knowledge_dir=str(KNOWLEDGE_DIR.resolve()),
@@ -61,7 +60,7 @@ def chat(request: ChatRequest) -> ChatResponse:
     if knowledge_store.count_units() == 0:
         raise HTTPException(status_code=400, detail="Knowledge base is empty. Run /ingest first.")
     try:
-        return assistant.answer(
+        response = assistant.answer(
             request.message,
             request.session_id,
             preferred_language=request.preferred_language,
@@ -69,7 +68,50 @@ def chat(request: ChatRequest) -> ChatResponse:
             images=request.images,
             image_names=request.image_names,
         )
+        stage_summary = ", ".join(
+            f"{name}={duration}ms" for name, duration in response.timing.stage_timings.items()
+        )
+        model_summary = ", ".join(
+            f"{name}={duration}ms" for name, duration in response.timing.model_calls.items()
+        )
+        print(
+            "[chat-timing] "
+            f"session={request.session_id} "
+            f"mode={request.mode} "
+            f"images={len(request.images)} "
+            f"model={response.model_name} "
+            f"total_ms={response.timing.total_duration_ms} "
+            f"path={response.timing.metadata.get('path_type', 'unknown')} "
+            f"verification={response.verification_used} "
+            f"review={response.timing.metadata.get('review_used', False)} "
+            f"primary_hits={response.timing.metadata.get('primary_hit_count', 0)} "
+            f"verification_hits={response.timing.metadata.get('verification_hit_count', 0)} "
+            f"tools={response.timing.metadata.get('tool_count', 0)} "
+            f"context_chars={response.timing.metadata.get('compressed_context_chars', 0)} "
+            f"stages=[{stage_summary}] "
+            f"models=[{model_summary}]"
+        )
+        return response
     except Exception as exc:
+        if isinstance(exc, PipelineExecutionError):
+            stage_summary = ", ".join(
+                f"{name}={duration}ms" for name, duration in exc.stage_timings.items()
+            )
+            model_summary = ", ".join(
+                f"{name}={duration}ms" for name, duration in exc.model_calls.items()
+            )
+            print(
+                "[chat-timing-error] "
+                f"session={request.session_id} "
+                f"mode={request.mode} "
+                f"images={len(request.images)} "
+                f"failed_stage={exc.timing_metadata.get('failed_stage', 'unknown')} "
+                f"path={exc.timing_metadata.get('path_type', 'unknown')} "
+                f"context_chars={exc.timing_metadata.get('compressed_context_chars', 0)} "
+                f"stages=[{stage_summary}] "
+                f"models=[{model_summary}] "
+                f"error={exc}"
+            )
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
