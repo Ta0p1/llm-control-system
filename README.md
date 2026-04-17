@@ -1,6 +1,6 @@
 # Offline Control System Assistant
 
-An offline control-systems study and solving assistant built around `Qwen3.5 + Ollama + Qdrant + LangGraph + local math tools`.
+An offline control-systems study and solving assistant built around `Qwen + Ollama + Qdrant + LangGraph + local math tools`.
 
 ## What This Version Does
 
@@ -25,8 +25,8 @@ An offline control-systems study and solving assistant built around `Qwen3.5 + O
 ## Local Stack
 
 - Runtime model:
-  - text reasoning: `qwen3.5:9b`
-  - image parsing: `qwen3.5:9b`
+  - text reasoning: `qwen3:8b`
+  - image parsing: `qwen2.5vl:7b`
 - Embedding model:
   - preferred: `qwen3-embedding:4b`
   - fallback: `bge-m3`
@@ -72,7 +72,8 @@ python -m pip install -r requirements.txt
 ```
 
 The app runs at [http://127.0.0.1:8000](http://127.0.0.1:8000).
-`qwen3.5:9b` is required for both text and image questions; the app no longer silently falls back to `qwen3:8b` or `qwen2.5vl:3b`.
+`main` now defaults to `qwen3:8b` for text and `qwen2.5vl:7b` for image questions.
+The `qwen3.5:9b` experiment is preserved on branch `codex/qwen35-9b-runtime-experiment`.
 
 ## API
 

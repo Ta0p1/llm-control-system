@@ -99,7 +99,7 @@ async function syncAttachedImages() {
 async function askQuestion() {
   const message = questionInput.value.trim();
   if (!message) return;
-  answerOutput.textContent = "Qwen3.5 is reading your material and preparing an answer...";
+  answerOutput.textContent = "The assistant is reading your material and preparing an answer...";
   stepsOutput.innerHTML = "";
   citationsOutput.innerHTML = "";
   timingOutput.textContent = "Collecting timing data...";
