@@ -6,7 +6,7 @@ from typing import Any
 
 import httpx
 
-from app.config import CHAT_MODEL_CANDIDATES, DEV_CHAT_MODEL, OLLAMA_BASE_URL, OLLAMA_TIMEOUT_SECONDS
+from app.config import CHAT_MODEL_CANDIDATES, OLLAMA_BASE_URL, OLLAMA_TIMEOUT_SECONDS, RUNTIME_MODEL
 from app.schemas import RuntimeProfile
 
 
@@ -38,18 +38,13 @@ def fetch_installed_ollama_models() -> tuple[bool, list[str]]:
 
 
 def recommend_chat_model(installed_models: list[str], total_vram_mb: int) -> str:
-    preferred = CHAT_MODEL_CANDIDATES[0]
-    fallback = DEV_CHAT_MODEL
     normalized = set(installed_models)
-
-    if preferred in normalized and total_vram_mb >= 11000:
-        return preferred
-    if fallback in normalized:
-        return fallback
+    if RUNTIME_MODEL in normalized:
+        return RUNTIME_MODEL
     for candidate in CHAT_MODEL_CANDIDATES:
         if candidate in normalized:
             return candidate
-    return fallback
+    return RUNTIME_MODEL
 
 
 def build_runtime_profile() -> RuntimeProfile:

@@ -66,8 +66,8 @@ if ($missing.Count -gt 0) {
     exit 1
 }
 
-$requiredModels = @("qwen3:8b", "qwen3-embedding:4b")
-$optionalModels = @("qwen3:14b", "bge-m3", "qwen2.5vl:3b")
+$requiredModels = @("qwen3.5:9b", "qwen3-embedding:4b")
+$optionalModels = @("bge-m3")
 $installedModels = @()
 if ($tags -and $tags.models) {
     $installedModels = $tags.models | ForEach-Object { $_.name }
@@ -92,6 +92,7 @@ if ($missingModels.Count -gt 0) {
         Write-Host "You can pull them with:" -ForegroundColor Yellow
         Write-Host ".\pull_models.ps1"
     }
+    exit 1
 }
 
 $missingOptionalModels = @()
@@ -104,9 +105,8 @@ foreach ($optionalModel in $optionalModels) {
 
 if ($missingOptionalModels.Count -gt 0) {
     Write-Host ""
-    Write-Host "Optional vision model missing: $($missingOptionalModels -join ', ')" -ForegroundColor Yellow
-    Write-Host "Image questions will work after you pull it with .\pull_models.ps1" -ForegroundColor Yellow
+    Write-Host "Optional local models missing: $($missingOptionalModels -join ', ')" -ForegroundColor Yellow
 }
 
-Write-Host "Starting local app at http://$HostAddress`:$Port" -ForegroundColor Green
+Write-Host "Starting local app at http://$HostAddress`:$Port using qwen3.5:9b for both text and image parsing" -ForegroundColor Green
 python -m uvicorn app.server:app --host $HostAddress --port $Port --reload

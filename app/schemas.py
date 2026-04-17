@@ -180,3 +180,59 @@ class TeacherNoteRecord(BaseModel):
     teacher_model: str
     verification_status: Literal["unverified", "verified"] = "unverified"
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ProblemPairRecord(BaseModel):
+    chapter: str
+    problem_id: str
+    pair_key: str
+    problem_title: str | None = None
+    problem_text: str
+    official_solution_text: str
+    problem_source_path: str
+    solution_source_path: str
+    problem_page_or_slide: int | None = None
+    solution_page_or_slide: int | None = None
+
+
+class TeacherBatchBundle(BaseModel):
+    chapter: str
+    exported_problem_ids: list[str]
+    records: list[ProblemPairRecord] = Field(default_factory=list)
+
+
+class FinalExamPage(BaseModel):
+    exam_id: str
+    page_number: int
+    extracted_text: str = ""
+    image_paths: list[str] = Field(default_factory=list)
+
+
+class FinalQuestionRecord(BaseModel):
+    exam_id: str
+    question_id: str
+    title: str
+    question_text: str
+    source_path: str
+    source_pages: list[int] = Field(default_factory=list)
+
+
+class FinalSolutionRecord(BaseModel):
+    solution_id: str
+    exam_id: str
+    question_id: str
+    title: str
+    question_text: str
+    full_solution: str
+    final_answer: str
+    key_formulas: list[str] = Field(default_factory=list)
+    method_tags: list[str] = Field(default_factory=list)
+    teacher_model: str
+    verification_status: Literal["unverified", "verified"] = "unverified"
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class FinalExamBatchBundle(BaseModel):
+    exam_id: str
+    source_path: str
+    pages: list[FinalExamPage] = Field(default_factory=list)

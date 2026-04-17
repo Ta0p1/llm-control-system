@@ -25,15 +25,21 @@ from app.config import (
 )
 from app.extractors import SUPPORTED_EXTENSIONS, build_document_units, load_teacher_notes
 from app.ollama_client import OllamaClient
-from app.schemas import DocumentUnit, EvalCase, FileIngestStatus, IngestResponse, RetrievalHit
+from app.schemas import DocumentUnit, EvalCase, FileIngestStatus, IngestResponse, ProblemPairRecord, RetrievalHit
 
 
 class KnowledgeStore:
-    def __init__(self, db_path: Path = DB_PATH, knowledge_dir: Path = KNOWLEDGE_DIR) -> None:
+    def __init__(
+        self,
+        db_path: Path = DB_PATH,
+        knowledge_dir: Path = KNOWLEDGE_DIR,
+        *,
+        enable_vector_store: bool = True,
+    ) -> None:
         self.db_path = db_path
         self.knowledge_dir = knowledge_dir
         self.ollama = OllamaClient()
-        self.qdrant = QdrantClient(path=str(QDRANT_PATH))
+        self.qdrant = QdrantClient(path=str(QDRANT_PATH)) if enable_vector_store else None
         self._ensure_schema()
         atexit.register(self.close)
 
@@ -208,27 +214,29 @@ class KnowledgeStore:
                 and existing["embed_model"] == EMBED_MODEL
                 and not force_full_rebuild
             ):
+                collection_name = units[0].source_family
                 statuses.append(
                     FileIngestStatus(
                         file_path=file_path,
                         status="skipped",
-                        collection="notes_silver",
+                        collection=collection_name,
                         chapter=units[0].chapter,
-                        message="No silver note changes detected.",
+                        message=f"No {collection_name} changes detected.",
                     )
                 )
                 continue
 
             embeddings = self._embed_texts([unit.text for unit in units])
-            self._replace_units(file_path, "notes_silver", units, embeddings, file_hash, source_type="json")
+            collection_name = units[0].source_family
+            self._replace_units(file_path, collection_name, units, embeddings, file_hash, source_type="json")
             statuses.append(
                 FileIngestStatus(
                     file_path=file_path,
                     status="indexed",
-                    collection="notes_silver",
+                    collection=collection_name,
                     chapter=units[0].chapter,
                     units=len(units),
-                    message="Indexed silver notes.",
+                    message=f"Indexed {collection_name}.",
                 )
             )
         return statuses
@@ -271,6 +279,7 @@ class KnowledgeStore:
                 "problem_gold": 1.05,
                 "solution_gold": 0.98,
                 "notes_silver": 0.96,
+                "final_solution_silver": 1.06,
             }.get(hit.unit.source_family, 1.0)
             pair_bonus = PAIR_BOOST if hit.unit.pair_key and hit.unit.pair_key in prefer_pair_keys else 0.0
             hit.score = (0.78 * hit.dense_score) + (0.22 * hit.lexical_score)
@@ -325,6 +334,63 @@ class KnowledgeStore:
             )
         return cases
 
+    def get_problem_pair_records(
+        self,
+        *,
+        chapter: str,
+        limit: int | None = None,
+        problem_ids: list[str] | None = None,
+    ) -> list[ProblemPairRecord]:
+        problem_ids = problem_ids or []
+        with self._connect() as conn:
+            problem_rows = conn.execute(
+                """
+                SELECT problem_id, pair_key, title, text, file_path, page_or_slide, chunk_index
+                FROM units
+                WHERE chapter = ? AND collection_name = 'problem_gold'
+                ORDER BY problem_id, page_or_slide, chunk_index
+                """,
+                (chapter,),
+            ).fetchall()
+            solution_rows = conn.execute(
+                """
+                SELECT problem_id, pair_key, title, text, file_path, page_or_slide, chunk_index
+                FROM units
+                WHERE chapter = ? AND collection_name = 'solution_gold'
+                ORDER BY problem_id, page_or_slide, chunk_index
+                """,
+                (chapter,),
+            ).fetchall()
+
+        problem_map = collapse_problem_units(problem_rows)
+        solution_map = collapse_problem_units(solution_rows)
+        candidate_ids = sorted(set(problem_map) & set(solution_map), key=natural_problem_sort_key)
+        if problem_ids:
+            allowed = set(problem_ids)
+            candidate_ids = [problem_id for problem_id in candidate_ids if problem_id in allowed]
+        if limit is not None:
+            candidate_ids = candidate_ids[:limit]
+
+        records: list[ProblemPairRecord] = []
+        for problem_id in candidate_ids:
+            problem_row = problem_map[problem_id]
+            solution_row = solution_map[problem_id]
+            records.append(
+                ProblemPairRecord(
+                    chapter=chapter,
+                    problem_id=problem_id,
+                    pair_key=problem_row["pair_key"] or solution_row["pair_key"],
+                    problem_title=problem_row["title"],
+                    problem_text=problem_row["text"],
+                    official_solution_text=solution_row["text"],
+                    problem_source_path=problem_row["file_path"],
+                    solution_source_path=solution_row["file_path"],
+                    problem_page_or_slide=problem_row["page_or_slide"],
+                    solution_page_or_slide=solution_row["page_or_slide"],
+                )
+            )
+        return records
+
     def count_units(self) -> int:
         with self._connect() as conn:
             row = conn.execute("SELECT COUNT(*) AS count FROM units").fetchone()
@@ -341,6 +407,8 @@ class KnowledgeStore:
         return sorted(self.collection_counts())
 
     def qdrant_reachable(self) -> bool:
+        if self.qdrant is None:
+            return False
         try:
             self.qdrant.get_collections()
             return True
@@ -348,6 +416,8 @@ class KnowledgeStore:
             return False
 
     def close(self) -> None:
+        if self.qdrant is None:
+            return
         try:
             self.qdrant.close()
         except Exception:
@@ -363,6 +433,8 @@ class KnowledgeStore:
         *,
         source_type: str | None = None,
     ) -> None:
+        if self.qdrant is None:
+            raise RuntimeError("Vector store is disabled for this KnowledgeStore instance.")
         self._delete_existing_points(file_path)
         self._ensure_collection(collection_name, len(embeddings[0]))
 
@@ -434,6 +506,8 @@ class KnowledgeStore:
             )
 
     def _delete_existing_points(self, file_path: str) -> None:
+        if self.qdrant is None:
+            raise RuntimeError("Vector store is disabled for this KnowledgeStore instance.")
         with self._connect() as conn:
             rows = conn.execute(
                 "SELECT point_id, collection_name FROM units WHERE file_path = ?",
@@ -451,6 +525,8 @@ class KnowledgeStore:
             )
 
     def _ensure_collection(self, collection_name: str, vector_size: int) -> None:
+        if self.qdrant is None:
+            raise RuntimeError("Vector store is disabled for this KnowledgeStore instance.")
         collections = {item.name for item in self.qdrant.get_collections().collections}
         if collection_name in collections:
             current = self.qdrant.get_collection(collection_name=collection_name)
@@ -472,6 +548,8 @@ class KnowledgeStore:
         chapter: str | None = None,
         problem_id: str | None = None,
     ) -> dict[str, float]:
+        if self.qdrant is None:
+            raise RuntimeError("Vector store is disabled for this KnowledgeStore instance.")
         scores: dict[str, float] = {}
         for collection_name in source_families:
             if collection_name not in self.indexed_collections():
@@ -556,7 +634,7 @@ class KnowledgeStore:
             title=row["title"],
             page_or_slide=row["page_or_slide"],
             chunk_index=row["chunk_index"],
-            is_answer_like=row["collection_name"] == "solution_gold",
+            is_answer_like=row["collection_name"] in {"solution_gold", "final_solution_silver"},
             text=row["text"],
             excerpt=row["excerpt"],
             metadata=metadata,
@@ -619,3 +697,40 @@ def re_split(text: str) -> list[str]:
     if token:
         tokens.append("".join(token))
     return tokens
+
+
+def natural_problem_sort_key(problem_id: str) -> tuple[int, int]:
+    try:
+        left, right = problem_id.split(".", maxsplit=1)
+        return int(left), int(right)
+    except Exception:
+        return (10**9, 10**9)
+
+
+def collapse_problem_units(rows: list[sqlite3.Row]) -> dict[str, dict[str, object]]:
+    grouped: dict[str, dict[str, object]] = {}
+    for row in rows:
+        problem_id = row["problem_id"]
+        if not problem_id:
+            continue
+        item = grouped.setdefault(
+            problem_id,
+            {
+                "pair_key": row["pair_key"],
+                "title": row["title"],
+                "file_path": row["file_path"],
+                "page_or_slide": row["page_or_slide"],
+                "parts": [],
+            },
+        )
+        item["parts"].append(row["text"])
+    collapsed: dict[str, dict[str, object]] = {}
+    for problem_id, item in grouped.items():
+        collapsed[problem_id] = {
+            "pair_key": item["pair_key"],
+            "title": item["title"],
+            "file_path": item["file_path"],
+            "page_or_slide": item["page_or_slide"],
+            "text": "\n".join(part.strip() for part in item["parts"] if str(part).strip()),
+        }
+    return collapsed

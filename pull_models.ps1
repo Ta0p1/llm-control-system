@@ -30,13 +30,7 @@ if (-not $ollamaExe) {
     Write-Error "Ollama is not installed or not on PATH."
 }
 
-$models = @("qwen3:8b", "qwen3-embedding:4b", "bge-m3")
-if (-not $SkipLargeModel) {
-    $models += "qwen3:14b"
-}
-if (-not $SkipVisionModel) {
-    $models += "qwen2.5vl:3b"
-}
+$models = @("qwen3.5:9b", "qwen3-embedding:4b", "bge-m3")
 
 foreach ($model in $models) {
     Write-Host "Pulling $model ..." -ForegroundColor Cyan

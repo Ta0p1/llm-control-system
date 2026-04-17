@@ -7,7 +7,7 @@ import uuid
 from pathlib import Path
 
 from app.config import CHUNK_OVERLAP_CHARS, ENABLE_DOCLING, MAX_CHUNK_CHARS, SILVER_NOTES_DIR
-from app.schemas import DocumentUnit, TeacherNoteRecord
+from app.schemas import DocumentUnit, FinalSolutionRecord, TeacherNoteRecord
 
 SUPPORTED_EXTENSIONS = {".pdf", ".ppt", ".pptx"}
 PROBLEM_HEADER_PATTERN = re.compile(r"(?m)^(?P<problem_id>\d+\.\d+)\s+(?P<title>.+)$")
@@ -252,11 +252,14 @@ def load_teacher_notes(include_silver: bool = True) -> list[DocumentUnit]:
     notes: list[DocumentUnit] = []
     for path in sorted(SILVER_NOTES_DIR.glob("*.json")):
         try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
+            payload = json.loads(path.read_text(encoding="utf-8-sig"))
         except Exception:
             continue
         records = payload if isinstance(payload, list) else [payload]
         for index, item in enumerate(records):
+            if is_final_solution_payload(item):
+                notes.extend(build_final_solution_units(path, item, index))
+                continue
             try:
                 note = TeacherNoteRecord.model_validate(item)
             except Exception:
@@ -285,6 +288,72 @@ def load_teacher_notes(include_silver: bool = True) -> list[DocumentUnit]:
                 )
             )
     return notes
+
+
+def is_final_solution_payload(item: object) -> bool:
+    if not isinstance(item, dict):
+        return False
+    required_keys = {"exam_id", "question_id", "full_solution", "final_answer"}
+    return required_keys.issubset(item)
+
+
+def build_final_solution_units(path: Path, item: dict[str, object], index: int) -> list[DocumentUnit]:
+    try:
+        record = FinalSolutionRecord.model_validate(item)
+    except Exception:
+        return []
+
+    pair = final_pair_key(record.exam_id, record.question_id)
+    combined_text = _normalize_text(
+        "\n".join(
+            [
+                f"Exam: {record.exam_id}",
+                f"Question: {record.question_id}",
+                f"Title: {record.title}",
+                f"Question Text:\n{record.question_text}",
+                f"Full Solution:\n{record.full_solution}",
+                f"Final Answer:\n{record.final_answer}",
+                f"Key Formulas: {', '.join(record.key_formulas)}" if record.key_formulas else "",
+                f"Method Tags: {', '.join(record.method_tags)}" if record.method_tags else "",
+            ]
+        )
+    )
+    units: list[DocumentUnit] = []
+    for chunk_index, chunk_text in enumerate(split_text_segments(combined_text)):
+        units.append(
+            DocumentUnit(
+                point_id=stable_point_id(path, "final_solution_silver", record.solution_id, index, chunk_index),
+                file_path=str(path.resolve()),
+                source_type="json",
+                source_family="final_solution_silver",
+                source_quality="silver",
+                problem_id=record.question_id,
+                pair_key=pair,
+                title=record.title,
+                unit_kind="final_solution",
+                chunk_index=chunk_index,
+                is_answer_like=True,
+                text=chunk_text,
+                excerpt=chunk_text[:240],
+                metadata={
+                    "exam_id": record.exam_id,
+                    "question_id": record.question_id,
+                    "pair_key": pair,
+                    "verification_status": record.verification_status,
+                    "teacher_model": record.teacher_model,
+                    "key_formulas": record.key_formulas,
+                    "method_tags": record.method_tags,
+                    **record.metadata,
+                },
+            )
+        )
+    return units
+
+
+def final_pair_key(exam_id: str, question_id: str) -> str:
+    normalized_exam = re.sub(r"[^a-zA-Z0-9]+", "_", exam_id).strip("_")
+    normalized_question = re.sub(r"[^a-zA-Z0-9]+", "_", question_id).strip("_")
+    return f"{normalized_exam}_{normalized_question}"
 
 
 def join_with_page_markers(pages: list[tuple[int, str]]) -> tuple[str, list[tuple[int, int]]]:

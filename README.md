@@ -1,6 +1,6 @@
 # Offline Control System Assistant
 
-An offline control-systems study and solving assistant built around `Qwen + Ollama + Qdrant + LangGraph + local math tools`.
+An offline control-systems study and solving assistant built around `Qwen3.5 + Ollama + Qdrant + LangGraph + local math tools`.
 
 ## What This Version Does
 
@@ -11,7 +11,8 @@ An offline control-systems study and solving assistant built around `Qwen + Olla
   - `problem_gold`
   - `solution_gold`
   - `notes_silver` from local JSON files in `data/silver_notes/`
-- Excludes `final tests` from the active index for now
+  - `final_solution_silver` from local JSON files in `data/silver_notes/`
+- Excludes the raw `AER372W_2025_final_test.pdf` from the silver-final workflow
 - Uses a staged solve pipeline:
   - classify
   - parse image if present
@@ -23,11 +24,9 @@ An offline control-systems study and solving assistant built around `Qwen + Olla
 
 ## Local Stack
 
-- Chat model:
-  - dev default: `qwen3:8b`
-  - target preference: `qwen3:14b`
-- Vision model:
-  - `qwen2.5vl:3b`
+- Runtime model:
+  - text reasoning: `qwen3.5:9b`
+  - image parsing: `qwen3.5:9b`
 - Embedding model:
   - preferred: `qwen3-embedding:4b`
   - fallback: `bge-m3`
@@ -72,6 +71,7 @@ python -m pip install -r requirements.txt
 ```
 
 The app runs at [http://127.0.0.1:8000](http://127.0.0.1:8000).
+`qwen3.5:9b` is required for both text and image questions; the app no longer silently falls back to `qwen3:8b` or `qwen2.5vl:3b`.
 
 ## API
 
@@ -81,7 +81,7 @@ Returns:
 - Ollama connectivity
 - Qdrant availability
 - installed models
-- recommended chat model
+- required runtime model
 - indexed collections
 - total indexed units
 
@@ -122,12 +122,154 @@ Example:
 }
 ```
 
-## Teacher Pipeline Scaffold
+## Silver Notes Workflow
 
-The project includes a local scaffold for future cloud-teacher note generation:
+This project now includes a local workflow for generating `notes_silver` with ChatGPT UI.
 
-- primary teacher target: `gpt-5.2`
-- review teacher target: `claude-opus-4.1`
-- optional arbiter target: `gemini-2.5-pro`
+### 1. Export a chapter batch for ChatGPT
 
-Teacher-generated notes must be written as JSON into `data/silver_notes/`, then re-indexed with `/ingest`.
+Example: export the first 5 problem-solution pairs from Chapter 2
+
+```powershell
+python -m app.teacher_pipeline export --chapter chapter2 --limit 5
+```
+
+This creates a local batch folder under:
+
+```text
+data/teacher_batches/chapter2/
+```
+
+with:
+
+- `chapter2_problem_cards_source.json`
+- `chapter2_chatgpt_prompt.txt`
+- `chapter2_how_to_use.txt`
+
+### 2. Use ChatGPT UI
+
+- Open `chapter2_chatgpt_prompt.txt`
+- Copy the full prompt into ChatGPT
+- Ask for raw JSON only
+- Save the ChatGPT reply as a local JSON file, for example:
+
+```text
+chapter2_chatgpt_output.json
+```
+
+### 3. Validate the returned JSON
+
+```powershell
+python -m app.teacher_pipeline validate --input "<path to chapter2_chatgpt_output.json>" --chapter chapter2
+```
+
+### 4. Merge into `notes_silver`
+
+```powershell
+python -m app.teacher_pipeline merge --input "<path to chapter2_chatgpt_output.json>" --chapter chapter2
+```
+
+This writes or updates:
+
+```text
+data/silver_notes/chapter2_problem_cards.json
+```
+
+### 5. Re-index locally
+
+```powershell
+python -m app.teacher_pipeline reingest
+```
+
+### Expected card types
+
+For each problem pair, the prompt asks ChatGPT to generate:
+
+- one `method_card`
+- one `formula_card`
+- one `pitfall_card`
+
+### Review guidance
+
+Before changing `verification_status` to `verified`, check:
+
+- the note stays faithful to the official problem and solution
+- no new unsupported conclusion was added
+- formulas and variable meanings are correct
+- `chapter`, `pair_key`, and `problem_id` are correct
+
+## Final Solution Workflow
+
+This project also supports a separate `final_solution_silver` workflow for all final tests except:
+
+- `AER372W_2025_final_test.pdf`
+
+### 1. Export a final exam batch
+
+Example:
+
+```powershell
+python -m app.teacher_pipeline export-finals --exam AER372S_2023_final_test
+```
+
+This creates a local batch folder under:
+
+```text
+data/teacher_batches/finals/AER372S_2023_final_test/
+```
+
+with:
+
+- `AER372S_2023_final_test_source.json`
+- `AER372S_2023_final_test_chatgpt_prompt.txt`
+- `AER372S_2023_final_test_how_to_use.txt`
+- exported page images under `page_assets/` when available
+
+### 2. Use ChatGPT UI for full worked solutions
+
+- Open the prompt file in the exam batch folder
+- Attach the exported page images when available
+- Paste the prompt into ChatGPT
+- Ask for raw JSON only
+- Save the response as a local JSON file
+
+### 3. Validate the returned final-solution JSON
+
+```powershell
+python -m app.teacher_pipeline validate --input "<path to final json>" --exam AER372S_2023_final_test
+```
+
+### 4. Merge into `final_solution_silver`
+
+```powershell
+python -m app.teacher_pipeline merge --input "<path to final json>" --exam AER372S_2023_final_test
+```
+
+This writes or updates:
+
+```text
+data/silver_notes/final_AER372S_2023_final_test_solutions.json
+```
+
+### 5. Re-index locally
+
+```powershell
+python -m app.teacher_pipeline reingest
+```
+
+### Expected final-solution fields
+
+Each solved final question should include:
+
+- `solution_id`
+- `exam_id`
+- `question_id`
+- `title`
+- `question_text`
+- `full_solution`
+- `final_answer`
+- `key_formulas`
+- `method_tags`
+- `teacher_model`
+- `verification_status`
+- `metadata`

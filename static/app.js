@@ -18,7 +18,7 @@ async function loadHealth() {
     const servicesReady = payload.ollama_reachable && payload.qdrant_reachable;
     healthPill.textContent = servicesReady ? "Ollama + Qdrant ready" : "Service check incomplete";
     healthPill.className = servicesReady ? "status-pill ok" : "status-pill warn";
-    modelPill.textContent = `Recommended text model: ${payload.recommended_model}`;
+    modelPill.textContent = `Active runtime model: ${payload.recommended_model}`;
     const collections = (payload.indexed_collections || []).join(", ") || "none yet";
     knowledgeDir.textContent = `Knowledge directory: ${payload.knowledge_dir} | units: ${payload.total_units} | collections: ${collections}`;
   } catch (error) {
@@ -98,7 +98,7 @@ async function syncAttachedImages() {
 async function askQuestion() {
   const message = questionInput.value.trim();
   if (!message) return;
-  answerOutput.textContent = "Qwen is reading your material and preparing an answer...";
+  answerOutput.textContent = "Qwen3.5 is reading your material and preparing an answer...";
   stepsOutput.innerHTML = "";
   citationsOutput.innerHTML = "";
 

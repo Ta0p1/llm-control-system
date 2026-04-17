@@ -51,6 +51,11 @@ Step-by-Step Solution
 Final Answer
 Sources
 If evidence is weak or missing, say so explicitly.
+Before finalizing a solve answer, perform a global consistency check:
+- stability claims must match pole real parts
+- system type must match steady-state error conclusions
+- time-response metrics must match the damping ratio and dominant poles used
+- the final summary must not contradict earlier derivations
 """
 
 
@@ -339,7 +344,7 @@ User question:
 Image summary:
 {state.get('image_summary', '') or 'No image summary.'}
 
-Primary evidence (theory, worked problems, silver notes):
+Primary evidence (theory, worked problems, silver notes, solved final references):
 {primary_context}
 
 Verification evidence (official solutions):
@@ -354,23 +359,42 @@ Tool results:
 Requirements:
 - Respond in {state['preferred_language']} unless the user explicitly asked otherwise.
 - Use the verification evidence only as a checking layer, not as the sole source of reasoning.
-- Clearly distinguish theory basis, problem similarity, and solution verification.
+- Clearly distinguish theory basis, problem similarity, recommended-solution verification, and final-solution references.
+- Run a final consistency pass before you answer:
+  - if poles have negative real parts, do not call the system unstable
+  - if a system is identified as type 2, step and ramp steady-state errors should be zero and parabolic error should be finite
+  - if you compute a dominant pole pair, the rise time, overshoot, and settling time must match that same pair
+  - the closing summary must agree with the derivation above it
 - If information is insufficient, state what is missing.
 - Use source markers like [1], [2] and list them in the Sources section.
 """
-        answer = self.ollama.chat(
+        draft_answer = self.ollama.chat(
             state["model_name"],
             [
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": final_prompt},
             ],
         )
+        answer, review_used = review_and_revise_answer(
+            self.ollama,
+            state["model_name"],
+            preferred_language=state["preferred_language"],
+            mode=state["mode"],
+            question=state["question"],
+            solve_plan=state["solve_plan"],
+            draft_answer=draft_answer,
+            tool_results=state.get("tool_results", []),
+        )
         citations = build_citations([*state["primary_hits"], *state["verification_hits"]])
         evidence_groups = build_evidence_groups([*state["primary_hits"], *state["verification_hits"]])
+        used_tools = state["used_tools"]
+        if review_used:
+            used_tools = sorted(set([*used_tools, "consistency-review"]))
         return {
             "answer": answer,
             "citations": citations,
             "evidence_groups": evidence_groups,
+            "used_tools": used_tools,
         }
 
 
@@ -481,6 +505,199 @@ def compute_confidence(primary_hits: list[RetrievalHit], verification_hits: list
         return 0.12
     mean_score = sum(scores) / len(scores)
     return max(0.12, min(0.97, round(mean_score, 4)))
+
+
+def review_and_revise_answer(
+    ollama: OllamaClient,
+    model_name: str,
+    *,
+    preferred_language: str,
+    mode: str,
+    question: str,
+    solve_plan: SolvePlan,
+    draft_answer: str,
+    tool_results: list[dict[str, Any]],
+) -> tuple[str, bool]:
+    if mode != "solve" or not draft_answer.strip():
+        return draft_answer, False
+
+    patched_answer, patched = apply_deterministic_consistency_fixes(draft_answer, tool_results)
+    heuristic_issues = detect_consistency_issues(patched_answer, tool_results)
+    if patched and not heuristic_issues:
+        return patched_answer, True
+
+    review_prompt = f"""
+Return strict JSON only with these fields:
+- verdict: "ok" or "revise"
+- issues: array of strings
+- revised_answer: string
+
+Task:
+Review the draft control-systems answer for internal consistency and alignment with the supplied evidence.
+If the draft is already consistent, return verdict "ok" and copy the original answer into revised_answer.
+If you find contradictions, fix only what is necessary and return verdict "revise".
+
+Hard checks:
+- stability labels must match the pole real parts shown in the answer or tool results
+- system type must match the reported steady-state errors
+- dominant-pole calculations and the reported rise time / overshoot / settling time must agree
+- the final summary must not contradict earlier calculations
+- do not add new citations or invent new evidence
+- preserve the original section structure
+- prefer minimal edits; keep every correct formula, value, and conclusion unchanged
+- never replace a correct symbolic or numeric quantity with a placeholder such as "?"
+- answer language: {preferred_language}
+
+User question:
+{question}
+
+Solve plan:
+{solve_plan.model_dump_json(indent=2)}
+
+Tool results:
+{json.dumps(tool_results, ensure_ascii=False, indent=2)}
+
+Heuristic warnings:
+{json.dumps(heuristic_issues, ensure_ascii=False, indent=2)}
+
+Draft answer:
+{patched_answer}
+"""
+    try:
+        raw = ollama.chat(
+            model_name,
+            [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": review_prompt},
+            ],
+            json_output=True,
+        )
+        parsed = ollama.parse_json(raw)
+        verdict = str(parsed.get("verdict", "ok")).strip().lower()
+        revised_answer = str(parsed.get("revised_answer", "")).strip()
+        if verdict == "revise" and revised_answer and not revision_looks_degraded(patched_answer, revised_answer):
+            return revised_answer, True
+        if revised_answer and not revision_looks_degraded(patched_answer, revised_answer):
+            return revised_answer, False
+    except Exception:
+        pass
+
+    if heuristic_issues:
+        fallback_prompt = f"""
+Revise the following control-systems answer so that it is internally consistent.
+Keep the same structure and language ({preferred_language}).
+Fix contradictions only. Do not add new citations or new evidence.
+Prefer minimal edits, and do not replace correct values with placeholders.
+
+Issues to fix:
+{json.dumps(heuristic_issues, ensure_ascii=False, indent=2)}
+
+Answer:
+{patched_answer}
+"""
+        try:
+            revised_answer = ollama.chat(
+                model_name,
+                [
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": fallback_prompt},
+                ],
+            ).strip()
+            if revised_answer and not revision_looks_degraded(patched_answer, revised_answer):
+                return revised_answer, True
+        except Exception:
+            pass
+
+    return patched_answer, patched
+
+
+def detect_consistency_issues(answer: str, tool_results: list[dict[str, Any]]) -> list[str]:
+    issues: list[str] = []
+    lowered = answer.lower()
+    poles = extract_complex_values(answer)
+    if poles:
+        if all(value.real < 0 for value in poles):
+            if re.search(r"\bunstable\b", lowered) and not re.search(r"\bnot unstable\b", lowered):
+                issues.append("The answer lists poles with negative real parts but later calls the closed-loop system unstable.")
+            if "positive real part" in lowered or "positive real parts" in lowered:
+                issues.append("The answer says the poles have positive real parts even though the written poles have negative real parts.")
+        if all(value.real > 0 for value in poles) and re.search(r"\bstable\b", lowered) and "unstable" not in lowered:
+            issues.append("The answer labels the system stable even though the written poles have positive real parts.")
+
+    for result in tool_results:
+        if result.get("type") != "transfer_function_analysis":
+            continue
+        stable = result.get("stable")
+        if stable is True and re.search(r"\bunstable\b", lowered) and not re.search(r"\bnot unstable\b", lowered):
+            issues.append("The answer says the system is unstable, but the transfer-function tool result reports stable=true.")
+        if stable is False and re.search(r"\bstable\b", lowered) and "unstable" not in lowered:
+            issues.append("The answer says the system is stable, but the transfer-function tool result reports stable=false.")
+
+    return issues
+
+
+def apply_deterministic_consistency_fixes(answer: str, tool_results: list[dict[str, Any]]) -> tuple[str, bool]:
+    fixed_answer = answer
+    changed = False
+    poles = extract_complex_values(answer)
+    stable_hint: bool | None = None
+    if poles:
+        if all(value.real < 0 for value in poles):
+            stable_hint = True
+        elif all(value.real > 0 for value in poles):
+            stable_hint = False
+
+    for result in tool_results:
+        if result.get("type") == "transfer_function_analysis" and isinstance(result.get("stable"), bool):
+            stable_hint = bool(result["stable"])
+
+    if stable_hint is True:
+        replacement = "Note: The system is stable as the listed closed-loop poles all have negative real parts."
+        updated = re.sub(
+            r"(?im)^.*(?:positive real part|positive real parts|unstable).*$",
+            replacement,
+            fixed_answer,
+        )
+        if updated != fixed_answer:
+            fixed_answer = updated
+            changed = True
+    elif stable_hint is False:
+        replacement = "Note: The system is unstable because the relevant closed-loop poles have positive real parts."
+        updated = re.sub(
+            r"(?im)^.*(?:stable|negative real part|negative real parts).*$",
+            replacement,
+            fixed_answer,
+        )
+        if updated != fixed_answer:
+            fixed_answer = updated
+            changed = True
+
+    return fixed_answer, changed
+
+
+def extract_complex_values(text: str) -> list[complex]:
+    pattern = re.compile(
+        r"=\s*([+-]?\d+(?:\.\d+)?)\s*([+-])\s*j\s*(\d+(?:\.\d+)?)",
+        flags=re.IGNORECASE,
+    )
+    values: list[complex] = []
+    for match in pattern.finditer(text):
+        real_part = float(match.group(1))
+        imag_part = float(match.group(3))
+        if match.group(2) == "-":
+            imag_part *= -1
+        values.append(complex(real_part, imag_part))
+    return values
+
+
+def revision_looks_degraded(original: str, revised: str) -> bool:
+    original_q = original.count("?")
+    revised_q = revised.count("?")
+    if revised_q > original_q + 6:
+        return True
+    if len(revised.strip()) < max(120, int(len(original.strip()) * 0.55)):
+        return True
+    return False
 
 
 def default_steps(mode: str, preferred_language: str) -> list[str]:
