@@ -77,6 +77,13 @@ class EvidenceGroup(BaseModel):
     hit_count: int
 
 
+class ChatTiming(BaseModel):
+    total_duration_ms: float = 0.0
+    stage_timings: dict[str, float] = Field(default_factory=dict)
+    model_calls: dict[str, float] = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
 class ChatRequest(BaseModel):
     message: str = Field(min_length=1)
     session_id: str = "default"
@@ -97,6 +104,7 @@ class ChatResponse(BaseModel):
     retrieval_plan: RetrievalPlan
     verification_used: bool = False
     evidence_groups: list[EvidenceGroup] = Field(default_factory=list)
+    timing: ChatTiming = Field(default_factory=ChatTiming)
 
 
 class DocumentUnit(BaseModel):

@@ -5,7 +5,7 @@ from typing import Any
 
 import httpx
 
-from app.config import EMBED_MODEL, OLLAMA_BASE_URL, OLLAMA_TIMEOUT_SECONDS
+from app.config import EMBED_MODEL, OLLAMA_BASE_URL, OLLAMA_DISABLE_THINKING, OLLAMA_TIMEOUT_SECONDS
 
 
 class OllamaClient:
@@ -21,20 +21,32 @@ class OllamaClient:
         messages: list[dict[str, Any]],
         *,
         json_output: bool = False,
+        options: dict[str, Any] | None = None,
     ) -> str:
         payload: dict[str, Any] = {
             "model": model,
             "messages": messages,
             "stream": False,
         }
+        if OLLAMA_DISABLE_THINKING:
+            payload["think"] = False
         if json_output:
             payload["format"] = "json"
+        if options:
+            payload["options"] = options
 
         with self._client() as client:
             response = client.post("/api/chat", json=payload)
             response.raise_for_status()
         data = response.json()
-        return data.get("message", {}).get("content", "").strip()
+        message = data.get("message", {}) or {}
+        content = str(message.get("content", "") or "").strip()
+        if content:
+            return content
+        thinking = str(message.get("thinking", "") or "").strip()
+        if thinking:
+            return thinking
+        return ""
 
     def embeddings(self, texts: list[str], model: str = EMBED_MODEL) -> list[list[float]]:
         if not texts:

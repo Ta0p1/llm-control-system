@@ -5,6 +5,7 @@ const ingestOutput = document.getElementById("ingest-output");
 const answerOutput = document.getElementById("answer-output");
 const stepsOutput = document.getElementById("steps-output");
 const citationsOutput = document.getElementById("citations-output");
+const timingOutput = document.getElementById("timing-output");
 const questionInput = document.getElementById("question");
 const imageInput = document.getElementById("image-input");
 const imagePreview = document.getElementById("image-preview");
@@ -101,6 +102,7 @@ async function askQuestion() {
   answerOutput.textContent = "Qwen3.5 is reading your material and preparing an answer...";
   stepsOutput.innerHTML = "";
   citationsOutput.innerHTML = "";
+  timingOutput.textContent = "Collecting timing data...";
 
   try {
     const response = await fetch("/chat", {
@@ -135,9 +137,46 @@ async function askQuestion() {
     });
     const verificationText = payload.verification_used ? "verification used" : "no verification layer";
     modelPill.textContent = `Model used: ${payload.model_name} | confidence: ${payload.confidence} | ${verificationText}`;
+    timingOutput.textContent = formatTiming(payload.timing || {});
   } catch (error) {
     answerOutput.textContent = `Chat request failed: ${error}`;
+    timingOutput.textContent = "No timing data available because the request failed.";
   }
+}
+
+function formatTiming(timing) {
+  const total = timing.total_duration_ms ?? 0;
+  const stages = timing.stage_timings || {};
+  const modelCalls = timing.model_calls || {};
+  const metadata = timing.metadata || {};
+  const stageEntries = Object.entries(stages);
+  const slowest = stageEntries.sort((a, b) => b[1] - a[1])[0];
+  const stageLines = Object.entries(stages).map(([name, ms]) => `${name}: ${ms} ms`);
+  const modelLines = Object.entries(modelCalls).map(([name, ms]) => `${name}: ${ms} ms`);
+  const metaLines = [
+    `path: ${metadata.path_type ?? "unknown"}`,
+    `images: ${metadata.image_count ?? 0}`,
+    `primary hits: ${metadata.primary_hit_count ?? 0}`,
+    `verification hits: ${metadata.verification_hit_count ?? 0}`,
+    `tool results: ${metadata.tool_count ?? 0}`,
+    `review used: ${metadata.review_used ?? false}`,
+    `compressed context chars: ${metadata.compressed_context_chars ?? 0}`,
+    `compose answer empty: ${metadata.compose_answer_empty ?? false}`,
+  ];
+  const lines = [
+    `total: ${total} ms`,
+    slowest ? `slowest stage: ${slowest[0]} (${slowest[1]} ms)` : "slowest stage: n/a",
+    "",
+    "stages:",
+    ...(stageLines.length ? stageLines : ["none"]),
+    "",
+    "model calls:",
+    ...(modelLines.length ? modelLines : ["none"]),
+    "",
+    "metadata:",
+    ...metaLines,
+  ];
+  return lines.join("\n");
 }
 
 document.getElementById("refresh-health").addEventListener("click", loadHealth);
