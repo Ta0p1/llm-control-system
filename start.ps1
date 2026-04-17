@@ -15,8 +15,8 @@ function Get-OllamaCommand {
     }
 
     $candidates = @(
-        "C:\Users\Allen Huang\AppData\Local\Programs\Ollama\ollama.exe",
-        "C:\Program Files\Ollama\ollama.exe"
+        (Join-Path $env:LOCALAPPDATA "Programs\Ollama\ollama.exe"),
+        (Join-Path $env:ProgramFiles "Ollama\ollama.exe")
     )
 
     foreach ($candidate in $candidates) {

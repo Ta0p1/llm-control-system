@@ -41,7 +41,8 @@ An offline control-systems study and solving assistant built around `Qwen3.5 + O
 
 ## Important Defaults
 
-- `final tests` are not indexed yet.
+- Raw final-test PDFs are not ingested directly into the main gold collections.
+- Final worked solutions generated through the ChatGPT UI workflow are indexed into `final_solution_silver`.
 - `Docling` support is installed but disabled by default.
 - To enable Docling-based parsing explicitly:
 
