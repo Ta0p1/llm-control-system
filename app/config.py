@@ -10,6 +10,7 @@ DATA_DIR = ROOT_DIR / "data"
 DB_PATH = DATA_DIR / "knowledge.db"
 QDRANT_PATH = DATA_DIR / "qdrant"
 SILVER_NOTES_DIR = DATA_DIR / "silver_notes"
+BENCHMARKS_DIR = DATA_DIR / "benchmarks"
 TEACHER_BATCHES_DIR = DATA_DIR / "teacher_batches"
 FINAL_BATCHES_DIR = TEACHER_BATCHES_DIR / "finals"
 
@@ -58,5 +59,6 @@ PAIR_BOOST = float(os.getenv("PAIR_BOOST", "0.08"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 QDRANT_PATH.mkdir(parents=True, exist_ok=True)
 SILVER_NOTES_DIR.mkdir(parents=True, exist_ok=True)
+BENCHMARKS_DIR.mkdir(parents=True, exist_ok=True)
 TEACHER_BATCHES_DIR.mkdir(parents=True, exist_ok=True)
 FINAL_BATCHES_DIR.mkdir(parents=True, exist_ok=True)

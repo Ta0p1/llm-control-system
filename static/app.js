@@ -12,6 +12,127 @@ const imagePreview = document.getElementById("image-preview");
 
 let attachedImages = [];
 
+function escapeHtml(value) {
+  return String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function renderInlineMarkdown(text) {
+  let html = escapeHtml(text);
+  html = html.replace(/`([^`]+)`/g, "<code>$1</code>");
+  html = html.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+  html = html.replace(/\[([^\]]+)\]/g, "<span class=\"source-marker\">[$1]</span>");
+  return html;
+}
+
+function renderMarkdown(markdown) {
+  const lines = String(markdown || "").replace(/\r\n/g, "\n").split("\n");
+  const html = [];
+  let inUl = false;
+  let inOl = false;
+  let inCode = false;
+  let paragraph = [];
+
+  function flushParagraph() {
+    if (!paragraph.length) return;
+    html.push(`<p>${renderInlineMarkdown(paragraph.join(" "))}</p>`);
+    paragraph = [];
+  }
+
+  function closeLists() {
+    if (inUl) {
+      html.push("</ul>");
+      inUl = false;
+    }
+    if (inOl) {
+      html.push("</ol>");
+      inOl = false;
+    }
+  }
+
+  for (const rawLine of lines) {
+    const line = rawLine.trimEnd();
+    const trimmed = line.trim();
+
+    if (trimmed.startsWith("```")) {
+      flushParagraph();
+      closeLists();
+      if (!inCode) {
+        html.push("<pre><code>");
+        inCode = true;
+      } else {
+        html.push("</code></pre>");
+        inCode = false;
+      }
+      continue;
+    }
+
+    if (inCode) {
+      html.push(`${escapeHtml(rawLine)}\n`);
+      continue;
+    }
+
+    if (!trimmed) {
+      flushParagraph();
+      closeLists();
+      continue;
+    }
+
+    const headingMatch = trimmed.match(/^(#{1,3})\s+(.+)$/);
+    if (headingMatch) {
+      flushParagraph();
+      closeLists();
+      const level = Math.min(headingMatch[1].length, 4);
+      html.push(`<h${level}>${renderInlineMarkdown(headingMatch[2])}</h${level}>`);
+      continue;
+    }
+
+    const ulMatch = trimmed.match(/^[-*]\s+(.+)$/);
+    if (ulMatch) {
+      flushParagraph();
+      if (inOl) {
+        html.push("</ol>");
+        inOl = false;
+      }
+      if (!inUl) {
+        html.push("<ul>");
+        inUl = true;
+      }
+      html.push(`<li>${renderInlineMarkdown(ulMatch[1])}</li>`);
+      continue;
+    }
+
+    const olMatch = trimmed.match(/^\d+\.\s+(.+)$/);
+    if (olMatch) {
+      flushParagraph();
+      if (inUl) {
+        html.push("</ul>");
+        inUl = false;
+      }
+      if (!inOl) {
+        html.push("<ol>");
+        inOl = true;
+      }
+      html.push(`<li>${renderInlineMarkdown(olMatch[1])}</li>`);
+      continue;
+    }
+
+    closeLists();
+    paragraph.push(trimmed);
+  }
+
+  flushParagraph();
+  closeLists();
+  if (inCode) {
+    html.push("</code></pre>");
+  }
+  return html.join("\n");
+}
+
 async function loadHealth() {
   try {
     const response = await fetch("/health");
@@ -122,7 +243,7 @@ async function askQuestion() {
       throw new Error(payload.detail || "Chat request failed");
     }
 
-    answerOutput.textContent = payload.answer;
+    answerOutput.innerHTML = renderMarkdown(payload.answer);
     renderList(stepsOutput, payload.steps, (step) => {
       const li = document.createElement("li");
       li.textContent = step;

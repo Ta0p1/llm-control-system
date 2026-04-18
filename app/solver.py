@@ -80,25 +80,46 @@ Do not guess unclear symbols; list them under unclear_items.
 Keep every field concise.
 """
 
-CONCEPT_ANSWER_PROMPT = """Answer the question in {language} using the retrieved theory evidence.
-Keep the answer concise but complete.
-Write normal text, not JSON.
-Use source markers like [1], [2] and end with a short Sources section.
+CONCEPT_ANSWER_PROMPT = """Write the final user-facing answer in {language} as clean Markdown.
+
+Style rules:
+- explain clearly, not like internal notes
+- do not mention prompts, retrieval, verification layers, or tool metadata
+- do not output JSON, YAML, or code fences unless the user explicitly asked for code
+- avoid filler such as "Here is the answer" or "Based on the provided context"
+
+Format rules:
+- use `##` headings only when helpful
+- keep paragraphs short
+- use bullet points only when they improve readability
+- include source markers like [1], [2] in the explanation when claims rely on evidence
+- end with a short `## Sources` section that only lists the markers used
 """
 
-SOLVE_ANSWER_PROMPT = """Answer in {language} with these sections only:
-Problem Restatement
-Knowns / Unknowns
-Theory Used
-Step-by-Step Solution
-Final Answer
-Sources
+SOLVE_ANSWER_PROMPT = """Write the final user-facing solution in {language} as clean Markdown.
 
-Be concise.
-Use source markers like [1], [2] and list them in the Sources section.
-Use verification evidence only as a checking layer.
-Do not repeat the same evidence in multiple sections.
-Write normal text, not JSON.
+Use exactly these sections in this order:
+## Problem Restatement
+## Knowns / Unknowns
+## Theory Used
+## Step-by-Step Solution
+## Final Answer
+## Sources
+
+Output rules:
+- this is a polished final solution, not internal reasoning notes
+- keep the section order exactly as given
+- be complete but not verbose
+- use equations inline when short, and short bullet lists when useful
+- use source markers like [1], [2] where evidence supports a statement
+- in `## Sources`, list only the markers actually used, one per bullet
+- do not mention prompts, retrieval, verification layers, tool calls, or "provided context"
+- do not output JSON, YAML, or code fences unless the user explicitly asked for code
+
+Reasoning rules:
+- use verification evidence only as a checking layer
+- do not repeat the same evidence in multiple sections
+- if information is insufficient, say so plainly in `## Final Answer`
 """
 
 
@@ -506,6 +527,7 @@ Hard consistency checks:
 - the final summary must agree with the calculations above it
 - if information is insufficient, say exactly what is missing
 - do not output JSON, YAML, or code fences
+- write only the final answer body, with no preface like "Here is the solution"
 """
         answer_options: dict[str, Any] = {"temperature": 0.1}
         if ANSWER_NUM_PREDICT is not None:
@@ -1076,7 +1098,7 @@ def render_answer_output(
     if not raw_answer.strip():
         return build_fallback_answer(mode=mode, question=question, solve_plan=solve_plan)
     if not looks_like_structured_output(raw_answer):
-        return normalize_plain_answer(raw_answer)
+        return clean_answer_output(normalize_plain_answer(raw_answer), mode=mode)
     try:
         payload = OllamaClient.parse_json(raw_answer)
     except Exception:
@@ -1087,7 +1109,10 @@ def render_answer_output(
             fallback = compact_text(raw_answer, 2400)
             if looks_like_structured_output(raw_answer):
                 return build_fallback_answer(mode=mode, question=question, solve_plan=solve_plan)
-            return fallback or build_fallback_answer(mode=mode, question=question, solve_plan=solve_plan)
+            return clean_answer_output(
+                fallback or build_fallback_answer(mode=mode, question=question, solve_plan=solve_plan),
+                mode=mode,
+            )
 
     answer_summary = compact_text(str(payload.get("answer_summary", "")).strip(), 600)
     theory_used = [compact_text(str(item), 160) for item in payload.get("theory_used", [])[:4]]
@@ -1111,8 +1136,8 @@ def render_answer_output(
             lines.extend(f"- {item}" for item in missing_info)
         lines.append("")
         lines.append("Sources")
-        lines.append("Use the cited local evidence listed below.")
-        return "\n".join(lines)
+        lines.append("- [1]")
+        return clean_answer_output("\n".join(lines), mode=mode)
 
     problem_restatement = solve_plan.problem_restatement or question
     knowns = solve_plan.knowns[:6]
@@ -1144,8 +1169,8 @@ def render_answer_output(
     if missing_info:
         lines.extend(["", "Missing Information"])
         lines.extend(f"- {item}" for item in missing_info)
-    lines.extend(["", "Sources", "Use the cited local evidence listed below."])
-    return "\n".join(lines)
+    lines.extend(["", "Sources", "- [1]"])
+    return clean_answer_output("\n".join(lines), mode=mode)
 
 
 def build_fallback_answer(*, mode: str, question: str, solve_plan: SolvePlan) -> str:
@@ -1153,19 +1178,19 @@ def build_fallback_answer(*, mode: str, question: str, solve_plan: SolvePlan) ->
         lines = [
             compact_text(solve_plan.problem_restatement or question, 320),
             "",
-            "Sources",
-            "Use the cited local evidence listed below.",
+            "## Sources",
+            "- [1]",
         ]
-        return "\n".join(lines)
+        return clean_answer_output("\n".join(lines), mode=mode)
 
     problem_restatement = compact_text(solve_plan.problem_restatement or question, 500)
     method = compact_text(solve_plan.method or "Use the retrieved evidence to derive the result.", 180)
     outline = solve_plan.solution_outline[:4] or default_steps("solve", "english")
     lines = [
-        "Problem Restatement",
+        "## Problem Restatement",
         problem_restatement,
         "",
-        "Knowns / Unknowns",
+        "## Knowns / Unknowns",
     ]
     if solve_plan.knowns or solve_plan.targets:
         lines.extend(f"- Known: {item}" for item in solve_plan.knowns[:6])
@@ -1174,21 +1199,21 @@ def build_fallback_answer(*, mode: str, question: str, solve_plan: SolvePlan) ->
         lines.append("- Not explicitly identified from the generated answer.")
     lines.extend([
         "",
-        "Theory Used",
+        "## Theory Used",
         f"- {method}",
         "",
-        "Step-by-Step Solution",
+        "## Step-by-Step Solution",
     ])
     lines.extend(f"{idx}. {compact_text(item, 180)}" for idx, item in enumerate(outline, start=1))
     lines.extend([
         "",
-        "Final Answer",
+        "## Final Answer",
         "The model did not return a complete final statement, so this answer falls back to the extracted plan. Please use the cited sources below and, if needed, ask a narrower follow-up question.",
         "",
-        "Sources",
-        "Use the cited local evidence listed below.",
+        "## Sources",
+        "- [1]",
     ])
-    return "\n".join(lines)
+    return clean_answer_output("\n".join(lines), mode=mode)
 
 
 def normalize_plain_answer(text: str, max_chars: int = 6000) -> str:
@@ -1197,6 +1222,54 @@ def normalize_plain_answer(text: str, max_chars: int = 6000) -> str:
     if len(normalized) <= max_chars:
         return normalized
     return normalized[: max_chars - 3].rstrip() + "..."
+
+
+def clean_answer_output(text: str, *, mode: str) -> str:
+    cleaned = text.strip()
+    cleaned = re.sub(r"(?im)^\s*(here is (the )?(answer|solution)[:\-]?)\s*\n*", "", cleaned)
+    cleaned = re.sub(r"(?im)^\s*(based on the (provided|retrieved) context[:,]?)\s*\n*", "", cleaned)
+    cleaned = re.sub(r"(?s)^```[a-zA-Z0-9_-]*\n(.*?)\n```$", r"\1", cleaned).strip()
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    cleaned = normalize_section_headings(cleaned, mode=mode)
+    cleaned = normalize_sources_section(cleaned)
+    return cleaned.strip()
+
+
+def normalize_section_headings(text: str, *, mode: str) -> str:
+    section_names = [
+        "Problem Restatement",
+        "Knowns / Unknowns",
+        "Theory Used",
+        "Step-by-Step Solution",
+        "Final Answer",
+        "Sources",
+        "Missing Information",
+    ]
+    normalized = text
+    for name in section_names:
+        normalized = re.sub(rf"(?im)^\s*{re.escape(name)}\s*$", f"## {name}", normalized)
+    if mode == "solve" and "## Problem Restatement" not in normalized:
+        lines = normalized.splitlines()
+        if lines and not lines[0].lstrip().startswith("#"):
+            lines.insert(0, "## Problem Restatement")
+            normalized = "\n".join(lines)
+    return normalized
+
+
+def normalize_sources_section(text: str) -> str:
+    if "## Sources" not in text:
+        return text
+    before, after = text.split("## Sources", maxsplit=1)
+    source_lines = [line.strip() for line in after.splitlines() if line.strip()]
+    cleaned_lines: list[str] = []
+    for line in source_lines:
+        if re.search(r"Use the cited local evidence listed below", line, flags=re.IGNORECASE):
+            continue
+        if line.startswith("- [") or line.startswith("["):
+            cleaned_lines.append(line if line.startswith("- ") else f"- {line}")
+    if not cleaned_lines:
+        cleaned_lines = ["- [1]"]
+    return before.rstrip() + "\n\n## Sources\n" + "\n".join(cleaned_lines)
 
 
 def looks_like_structured_output(text: str) -> bool:

@@ -75,6 +75,18 @@ The app runs at [http://127.0.0.1:8000](http://127.0.0.1:8000).
 `main` now defaults to `qwen3:8b` for text and `qwen2.5vl:7b` for image questions.
 The `qwen3.5:9b` experiment is preserved on branch `codex/qwen35-9b-runtime-experiment`.
 
+## Text-Only Diagram Input Guide
+
+If your real usage environment cannot upload images and you must describe figures in text, use:
+
+- [docs/TEXT_ONLY_IMAGE_DESCRIPTION_GUIDE.md](docs/TEXT_ONLY_IMAGE_DESCRIPTION_GUIDE.md)
+
+It includes:
+
+- a general template for describing missing images
+- control-systems-specific templates for block diagrams, root locus, pole-zero maps, time-response plots, and frequency-response plots
+- examples of good vs bad descriptions
+
 ## API
 
 ### `GET /health`
@@ -122,6 +134,28 @@ Example:
   "limit_per_chapter": 1,
   "use_solution_verification": true
 }
+```
+
+## Final-Answer Baseline
+
+This repo now includes a lightweight benchmark for evaluating whether a model can read an AER372 final-exam question and generate a correct, complete, well-structured answer in one text-only turn.
+
+Build the benchmark bundle:
+
+```powershell
+python -m app.final_generation_baseline build
+```
+
+Create a run folder for a model:
+
+```powershell
+python -m app.final_generation_baseline make-run --model "<model name>"
+```
+
+After manual scoring, summarize the run:
+
+```powershell
+python -m app.final_generation_baseline summarize --score-sheet "<path to score_sheet.csv>"
 ```
 
 ## Silver Notes Workflow

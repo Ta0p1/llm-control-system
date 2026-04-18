@@ -244,3 +244,45 @@ class FinalExamBatchBundle(BaseModel):
     exam_id: str
     source_path: str
     pages: list[FinalExamPage] = Field(default_factory=list)
+
+
+class BenchmarkRubricDimension(BaseModel):
+    name: str
+    max_points: float
+    description: str
+
+
+class BenchmarkRubric(BaseModel):
+    total_points: float = 10.0
+    dimensions: list[BenchmarkRubricDimension] = Field(default_factory=list)
+    required_elements: list[str] = Field(default_factory=list)
+    major_error_conditions: list[str] = Field(default_factory=list)
+    design_gate_rules: list[str] = Field(default_factory=list)
+    scoring_notes: list[str] = Field(default_factory=list)
+
+
+class BenchmarkProblemRecord(BaseModel):
+    id: str
+    source_exam: str
+    topic: str
+    difficulty: Literal["easy", "medium", "hard"]
+    problem_text: str
+    expected_capabilities: list[str] = Field(default_factory=list)
+    rubric: BenchmarkRubric
+
+
+class BenchmarkResponseRecord(BaseModel):
+    model_name: str
+    problem_id: str
+    raw_answer: str = ""
+    score_total: float = 0.0
+    score_breakdown: dict[str, float] = Field(default_factory=dict)
+    review_notes: str = ""
+
+
+class BenchmarkSummaryRecord(BaseModel):
+    model_name: str
+    avg_score: float = 0.0
+    topic_scores: dict[str, float] = Field(default_factory=dict)
+    completeness_rate: float = 0.0
+    major_error_count: int = 0
