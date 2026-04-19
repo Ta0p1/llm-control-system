@@ -27,6 +27,8 @@ body {
   background: var(--panel-strong);
   color: var(--ink);
   font-family: var(--ui);
+  -webkit-user-select: text;
+  user-select: text;
 }
 
 button,
@@ -276,6 +278,8 @@ input {
 
 .message-body {
   min-width: 0;
+  -webkit-user-select: text;
+  user-select: text;
 }
 
 .message-body.plain-user {
@@ -293,6 +297,17 @@ input {
   font-family: var(--ui);
   font-size: 0.92rem;
   line-height: 1.42;
+}
+
+.message-prefix,
+.window-bar,
+.window-actions,
+.mode-toggle,
+.ghost-button,
+.send-button,
+.file-trigger {
+  -webkit-user-select: none;
+  user-select: none;
 }
 
 .prompt-body {
@@ -566,9 +581,18 @@ pre {
 .math-block {
   margin: 0.28rem 0;
   padding: 0.18rem 0.1rem;
-  border-left: 3px solid #9bb6d4;
-  background: var(--math-bg);
+  border-left: 0;
+  background: transparent;
   overflow-x: auto;
+}
+
+.math-block .katex-display {
+  margin: 0;
+  text-align: left;
+}
+
+.math-block .katex-display > .katex {
+  text-align: left;
 }
 
 .math-inline-fallback,

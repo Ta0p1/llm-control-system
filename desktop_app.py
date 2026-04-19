@@ -41,6 +41,7 @@ def main() -> None:
         width=1320,
         height=460,
         min_size=(720, 180),
+        text_select=True,
     )
     webview.start()
 
