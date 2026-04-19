@@ -25,6 +25,7 @@ except ImportError:  # pragma: no cover - fallback stays available if dependency
 
 from app.config import (
     ANSWER_NUM_PREDICT,
+    OPENAI_MODEL,
     PLAN_NUM_PREDICT,
     PRIMARY_COLLECTIONS,
     REVIEW_NUM_PREDICT,
@@ -34,6 +35,7 @@ from app.config import (
 from app.extractors import extract_problem_id
 from app.knowledge_store import KnowledgeStore
 from app.ollama_client import OllamaClient
+from app.openai_client import OpenAIClient
 from app.runtime import build_runtime_profile
 from app.schemas import (
     ChatTiming,
@@ -58,7 +60,6 @@ Knowns / Unknowns
 Theory Used
 Step-by-Step Solution
 Final Answer
-Sources
 If evidence is weak or missing, say so explicitly.
 Before finalizing a solve answer, perform a global consistency check:
 - stability claims must match pole real parts
@@ -94,7 +95,7 @@ Format rules:
 - keep paragraphs short
 - use bullet points only when they improve readability
 - include source markers like [1], [2] in the explanation when claims rely on evidence
-- end with a short `## Sources` section that only lists the markers used
+- do not add a separate Sources section
 """
 
 SOLVE_ANSWER_PROMPT = """Write the final user-facing solution in {language} as clean Markdown.
@@ -105,7 +106,6 @@ Use exactly these sections in this order:
 ## Theory Used
 ## Step-by-Step Solution
 ## Final Answer
-## Sources
 
 Output rules:
 - this is a polished final solution, not internal reasoning notes
@@ -114,7 +114,6 @@ Output rules:
 - use equations inline when short, and use $...$ or $$...$$ when a mathematical expression should be rendered clearly
 - use short bullet lists when useful
 - use source markers like [1], [2] where evidence supports a statement
-- in `## Sources`, list only the markers actually used, one per bullet
 - do not mention prompts, retrieval, verification layers, tool calls, or "provided context"
 - do not output JSON, YAML, or code fences unless the user explicitly asked for code
 
@@ -145,6 +144,8 @@ class WorkflowState(TypedDict, total=False):
     preferred_language: str
     session_id: str
     chat_mode: str
+    answer_mode: str
+    retrieval_provider: str
     mode: str
     image_mode: str
     images: list[str]
@@ -173,6 +174,7 @@ class ControlSystemAssistant:
     def __init__(self) -> None:
         self.store = KnowledgeStore()
         self.ollama = OllamaClient()
+        self.openai = OpenAIClient()
         self.graph = self._build_graph()
 
     def answer(
@@ -182,18 +184,26 @@ class ControlSystemAssistant:
         *,
         preferred_language: str = "english",
         mode: str = "learning",
+        answer_mode: str = "local",
         images: list[str] | None = None,
         image_names: list[str] | None = None,
     ) -> ChatResponse:
         runtime_profile = build_runtime_profile()
+        selected_answer_mode = "gpt" if answer_mode == "gpt" else "local"
+        if selected_answer_mode == "gpt":
+            available, detail = self.openai.available()
+            if not available:
+                raise RuntimeError(detail)
         initial_state: WorkflowState = {
             "question": question,
             "preferred_language": preferred_language,
             "session_id": session_id,
             "chat_mode": mode,
+            "answer_mode": selected_answer_mode,
+            "retrieval_provider": "openai" if selected_answer_mode == "gpt" else "local",
             "images": normalize_images(images or []),
             "image_names": image_names or [],
-            "model_name": runtime_profile.recommended_model,
+            "model_name": OPENAI_MODEL if selected_answer_mode == "gpt" else runtime_profile.recommended_model,
             "primary_hits": [],
             "verification_hits": [],
             "used_tools": [],
@@ -201,6 +211,7 @@ class ControlSystemAssistant:
             "stage_timings": {},
             "model_calls": {},
             "timing_metadata": {
+                "answer_mode": selected_answer_mode,
                 "image_count": len(images or []),
                 "verification_used": False,
                 "review_used": False,
@@ -219,6 +230,7 @@ class ControlSystemAssistant:
             used_tools=state["used_tools"],
             confidence=state["confidence"],
             model_name=state["model_name"],
+            answer_mode=selected_answer_mode,
             retrieval_plan=state["retrieval_plan"],
             verification_used=state["verification_result"].used,
             evidence_groups=state["evidence_groups"],
@@ -300,6 +312,87 @@ class ControlSystemAssistant:
         state["timing_metadata"]["total_stage_count"] = len(stage_sequence) + len(remaining_stages)
         return state
 
+    def _chat_json(
+        self,
+        state: WorkflowState,
+        *,
+        stage_name: str,
+        system_prompt: str,
+        user_prompt: str,
+        max_output_tokens: int | None = None,
+        temperature: float = 0.0,
+        include_images: bool = False,
+        reasoning_effort: str | None = None,
+    ) -> dict[str, Any]:
+        started = perf_counter()
+        provider = state.get("answer_mode", "local")
+        try:
+            if provider == "gpt":
+                raw = self.openai.response(
+                    model=state["model_name"],
+                    instructions=system_prompt,
+                    input_text=user_prompt,
+                    images=state["images"] if include_images else None,
+                    reasoning_effort=reasoning_effort or "medium",
+                    max_output_tokens=max_output_tokens,
+                )
+                return self.openai.parse_json(raw)
+
+            options: dict[str, Any] = {"temperature": temperature}
+            if max_output_tokens is not None:
+                options["num_predict"] = max_output_tokens
+            raw = self.ollama.chat(
+                state["model_name"],
+                [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                json_output=True,
+                options=options,
+            )
+            return self.ollama.parse_json(raw)
+        finally:
+            state["model_calls"][stage_name] = round((perf_counter() - started) * 1000, 2)
+
+    def _chat_text(
+        self,
+        state: WorkflowState,
+        *,
+        stage_name: str,
+        system_prompt: str,
+        user_prompt: str,
+        max_output_tokens: int | None = None,
+        temperature: float = 0.1,
+        include_images: bool = False,
+        reasoning_effort: str | None = None,
+    ) -> str:
+        started = perf_counter()
+        provider = state.get("answer_mode", "local")
+        try:
+            if provider == "gpt":
+                return self.openai.response(
+                    model=state["model_name"],
+                    instructions=system_prompt,
+                    input_text=user_prompt,
+                    images=state["images"] if include_images else None,
+                    reasoning_effort=reasoning_effort or "medium",
+                    max_output_tokens=max_output_tokens,
+                )
+
+            options: dict[str, Any] = {"temperature": temperature}
+            if max_output_tokens is not None:
+                options["num_predict"] = max_output_tokens
+            return self.ollama.chat(
+                state["model_name"],
+                [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                options=options,
+            )
+        finally:
+            state["model_calls"][stage_name] = round((perf_counter() - started) * 1000, 2)
+
     def _classify_node(self, state: WorkflowState) -> WorkflowState:
         question = state["question"]
         mode = classify_question(question)
@@ -324,7 +417,6 @@ class ControlSystemAssistant:
     def _parse_images_node(self, state: WorkflowState) -> WorkflowState:
         if not state["images"]:
             return {"image_summary": ""}
-        start = perf_counter()
         prompt = f"""
 Return strict JSON with these fields only:
 - question_text: string
@@ -336,19 +428,32 @@ Return strict JSON with these fields only:
 Extract only visible control-systems information from the attached image(s).
 User question: {state['question']}
 """
-        image_message: dict[str, Any] = {"role": "user", "content": prompt, "images": state["images"]}
-        try:
-            raw_summary = self.ollama.chat(
-                VISION_MODEL,
-                [
-                    {"role": "system", "content": IMAGE_PARSE_SYSTEM_PROMPT},
-                    image_message,
-                ],
-                json_output=True,
+        if state.get("answer_mode") == "gpt":
+            parsed_summary = self._chat_json(
+                state,
+                stage_name="parse_images_model_ms",
+                system_prompt=IMAGE_PARSE_SYSTEM_PROMPT,
+                user_prompt=prompt,
+                include_images=True,
+                reasoning_effort="low",
             )
-        finally:
-            state["model_calls"]["parse_images_model_ms"] = round((perf_counter() - start) * 1000, 2)
-        used_tools = sorted(set([*state["used_tools"], "vision"]))
+            raw_summary = json.dumps(parsed_summary, ensure_ascii=False)
+            used_tools = sorted(set([*state["used_tools"], "openai-vision"]))
+        else:
+            start = perf_counter()
+            image_message: dict[str, Any] = {"role": "user", "content": prompt, "images": state["images"]}
+            try:
+                raw_summary = self.ollama.chat(
+                    VISION_MODEL,
+                    [
+                        {"role": "system", "content": IMAGE_PARSE_SYSTEM_PROMPT},
+                        image_message,
+                    ],
+                    json_output=True,
+                )
+            finally:
+                state["model_calls"]["parse_images_model_ms"] = round((perf_counter() - start) * 1000, 2)
+            used_tools = sorted(set([*state["used_tools"], "vision"]))
         image_summary = compress_image_summary(raw_summary)
         state["timing_metadata"]["image_summary_chars"] = len(image_summary)
         return {"image_summary": image_summary, "used_tools": used_tools}
@@ -364,6 +469,7 @@ User question: {state['question']}
                 source_families=primary_collections,
                 chapter=state.get("chapter_hint"),
                 problem_id=state.get("problem_id_hint"),
+                provider=state.get("retrieval_provider", "local"),
             )
             if use_retrieval
             else []
@@ -416,27 +522,21 @@ User question:
 Image summary:
 {state.get('image_summary', '') or 'No image summary.'}
 
-Retrieved context:
+        Retrieved context:
 {context}
 """
-        model_started = perf_counter()
         try:
-            plan_options: dict[str, Any] = {"temperature": 0}
-            if PLAN_NUM_PREDICT is not None:
-                plan_options["num_predict"] = PLAN_NUM_PREDICT
-            raw = self.ollama.chat(
-                state["model_name"],
-                [
-                    {"role": "system", "content": PLANNING_SYSTEM_PROMPT},
-                    {"role": "user", "content": planning_prompt},
-                ],
-                json_output=True,
-                options=plan_options,
+            parsed_plan = self._chat_json(
+                state,
+                stage_name="build_plan_model_ms",
+                system_prompt=PLANNING_SYSTEM_PROMPT,
+                user_prompt=planning_prompt,
+                max_output_tokens=PLAN_NUM_PREDICT,
+                temperature=0.0,
+                include_images=bool(state["images"]) and state.get("answer_mode") == "gpt",
+                reasoning_effort="low",
             )
-        finally:
-            state["model_calls"]["build_plan_model_ms"] = round((perf_counter() - model_started) * 1000, 2)
-        try:
-            solve_plan = SolvePlan.model_validate(self.ollama.parse_json(raw))
+            solve_plan = SolvePlan.model_validate(parsed_plan)
         except Exception:
             solve_plan = SolvePlan(
                 mode="solve",
@@ -472,6 +572,7 @@ Retrieved context:
             chapter=state.get("chapter_hint"),
             problem_id=state.get("problem_id_hint"),
             prefer_pair_keys=preferred_pairs,
+            provider=state.get("retrieval_provider", "local"),
         )
         retrieval_plan.stages.append("retrieve_verification")
         state["timing_metadata"]["verification_used"] = bool(verification_hits)
@@ -532,20 +633,16 @@ Hard consistency checks:
 - write only the final answer body, with no preface like "Here is the solution"
 """
         answer_options: dict[str, Any] = {"temperature": 0.1}
-        if ANSWER_NUM_PREDICT is not None:
-            answer_options["num_predict"] = ANSWER_NUM_PREDICT
-        compose_started = perf_counter()
-        try:
-            raw_answer = self.ollama.chat(
-                state["model_name"],
-                [
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": final_prompt},
-                ],
-                options=answer_options,
-            )
-        finally:
-            state["model_calls"]["compose_answer_model_ms"] = round((perf_counter() - compose_started) * 1000, 2)
+        raw_answer = self._chat_text(
+            state,
+            stage_name="compose_answer_model_ms",
+            system_prompt=SYSTEM_PROMPT,
+            user_prompt=final_prompt,
+            max_output_tokens=ANSWER_NUM_PREDICT,
+            temperature=answer_options["temperature"],
+            include_images=bool(state["images"]) and state.get("answer_mode") == "gpt",
+            reasoning_effort="medium" if state["mode"] == "solve" else "low",
+        )
         state["timing_metadata"]["compose_answer_empty"] = not bool(raw_answer.strip())
         draft_answer = render_answer_output(
             raw_answer,
@@ -555,8 +652,10 @@ Hard consistency checks:
             solve_plan=state["solve_plan"],
         )
         answer, review_used, review_ms = review_and_revise_answer(
-            self.ollama,
-            state["model_name"],
+            ollama=self.ollama,
+            openai=self.openai,
+            model_name=state["model_name"],
+            answer_mode=state.get("answer_mode", "local"),
             preferred_language=state["preferred_language"],
             mode=state["mode"],
             question=state["question"],
@@ -582,6 +681,22 @@ Hard consistency checks:
 
 def classify_question(question: str) -> str:
     lowered = question.lower()
+    concept_patterns = [
+        r"^\s*what is\b",
+        r"^\s*what are\b",
+        r"^\s*define\b",
+        r"^\s*explain\b",
+        r"^\s*describe\b",
+        r"^\s*compare\b",
+        r"^\s*why\b",
+        r"^\s*when\b",
+        r"^\s*how do\b",
+        r"^\s*how does\b",
+        r"\bmeaning of\b",
+        r"\bdifference between\b",
+    ]
+    if any(re.search(pattern, lowered) for pattern in concept_patterns):
+        return "concept"
     patterns = [
         r"\bfind\b",
         r"\bdetermine\b",
@@ -701,9 +816,11 @@ def compute_confidence(primary_hits: list[RetrievalHit], verification_hits: list
 
 
 def review_and_revise_answer(
-    ollama: OllamaClient,
-    model_name: str,
     *,
+    ollama: OllamaClient,
+    openai: OpenAIClient,
+    model_name: str,
+    answer_mode: str,
     preferred_language: str,
     mode: str,
     question: str,
@@ -758,20 +875,30 @@ Draft answer:
 """
     try:
         review_started = perf_counter()
-        review_options: dict[str, Any] = {"temperature": 0}
-        if REVIEW_NUM_PREDICT is not None:
-            review_options["num_predict"] = REVIEW_NUM_PREDICT
-        raw = ollama.chat(
-            model_name,
-            [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": review_prompt},
-            ],
-            json_output=True,
-            options=review_options,
-        )
+        if answer_mode == "gpt":
+            raw = openai.response(
+                model=model_name,
+                instructions=SYSTEM_PROMPT,
+                input_text=review_prompt,
+                reasoning_effort="low",
+                max_output_tokens=REVIEW_NUM_PREDICT,
+            )
+            parsed = openai.parse_json(raw)
+        else:
+            review_options: dict[str, Any] = {"temperature": 0}
+            if REVIEW_NUM_PREDICT is not None:
+                review_options["num_predict"] = REVIEW_NUM_PREDICT
+            raw = ollama.chat(
+                model_name,
+                [
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": review_prompt},
+                ],
+                json_output=True,
+                options=review_options,
+            )
+            parsed = ollama.parse_json(raw)
         review_ms = round((perf_counter() - review_started) * 1000, 2)
-        parsed = ollama.parse_json(raw)
         verdict = str(parsed.get("verdict", "ok")).strip().lower()
         revised_answer = str(parsed.get("revised_answer", "")).strip()
         if verdict == "revise" and revised_answer and not revision_looks_degraded(patched_answer, revised_answer):
@@ -1136,9 +1263,6 @@ def render_answer_output(
             lines.append("")
             lines.append("Missing Information")
             lines.extend(f"- {item}" for item in missing_info)
-        lines.append("")
-        lines.append("Sources")
-        lines.append("- [1]")
         return clean_answer_output("\n".join(lines), mode=mode)
 
     problem_restatement = solve_plan.problem_restatement or question
@@ -1171,7 +1295,6 @@ def render_answer_output(
     if missing_info:
         lines.extend(["", "Missing Information"])
         lines.extend(f"- {item}" for item in missing_info)
-    lines.extend(["", "Sources", "- [1]"])
     return clean_answer_output("\n".join(lines), mode=mode)
 
 
@@ -1179,9 +1302,6 @@ def build_fallback_answer(*, mode: str, question: str, solve_plan: SolvePlan) ->
     if mode == "concept":
         lines = [
             compact_text(solve_plan.problem_restatement or question, 320),
-            "",
-            "## Sources",
-            "- [1]",
         ]
         return clean_answer_output("\n".join(lines), mode=mode)
 
@@ -1210,10 +1330,7 @@ def build_fallback_answer(*, mode: str, question: str, solve_plan: SolvePlan) ->
     lines.extend([
         "",
         "## Final Answer",
-        "The model did not return a complete final statement, so this answer falls back to the extracted plan. Please use the cited sources below and, if needed, ask a narrower follow-up question.",
-        "",
-        "## Sources",
-        "- [1]",
+        "The model did not return a complete final statement, so this answer falls back to the extracted plan. If needed, ask a narrower follow-up question.",
     ])
     return clean_answer_output("\n".join(lines), mode=mode)
 
@@ -1244,7 +1361,6 @@ def normalize_section_headings(text: str, *, mode: str) -> str:
         "Theory Used",
         "Step-by-Step Solution",
         "Final Answer",
-        "Sources",
         "Missing Information",
     ]
     normalized = text
@@ -1259,19 +1375,13 @@ def normalize_section_headings(text: str, *, mode: str) -> str:
 
 
 def normalize_sources_section(text: str) -> str:
-    if "## Sources" not in text:
-        return text
-    before, after = text.split("## Sources", maxsplit=1)
-    source_lines = [line.strip() for line in after.splitlines() if line.strip()]
-    cleaned_lines: list[str] = []
-    for line in source_lines:
-        if re.search(r"Use the cited local evidence listed below", line, flags=re.IGNORECASE):
-            continue
-        if line.startswith("- [") or line.startswith("["):
-            cleaned_lines.append(line if line.startswith("- ") else f"- {line}")
-    if not cleaned_lines:
-        cleaned_lines = ["- [1]"]
-    return before.rstrip() + "\n\n## Sources\n" + "\n".join(cleaned_lines)
+    if "## Sources" in text:
+        before, _after = text.split("## Sources", maxsplit=1)
+        return before.rstrip()
+    if re.search(r"(?im)^\s*Sources\s*$", text):
+        before = re.split(r"(?im)^\s*Sources\s*$", text, maxsplit=1)[0]
+        return before.rstrip()
+    return text
 
 
 def looks_like_structured_output(text: str) -> bool:

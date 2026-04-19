@@ -1,4 +1,5 @@
-const STORAGE_KEY = "control-assistant-session-id";
+const SESSION_STORAGE_KEY = "control-assistant-session-id";
+const ANSWER_MODE_STORAGE_KEY = "control-assistant-answer-mode";
 
 const healthPill = document.getElementById("health-pill");
 const modelPill = document.getElementById("model-pill");
@@ -11,6 +12,7 @@ const transcript = document.getElementById("transcript");
 const sessionLabel = document.getElementById("session-label");
 const devPanel = document.getElementById("dev-panel");
 const devOverlay = document.getElementById("dev-overlay");
+const modeButtons = Array.from(document.querySelectorAll("[data-answer-mode]"));
 
 let currentSessionId = loadOrCreateSessionId();
 let currentMessages = [];
@@ -18,17 +20,45 @@ let activePromptText = "";
 let attachedImages = [];
 let pendingAssistantId = null;
 let shouldFocusPrompt = true;
+let selectedAnswerMode = loadAnswerMode();
+let openaiConfigured = false;
 
 function loadOrCreateSessionId() {
-  const existing = localStorage.getItem(STORAGE_KEY);
+  const existing = localStorage.getItem(SESSION_STORAGE_KEY);
   if (existing) return existing;
   const created = `web-${Date.now()}`;
-  localStorage.setItem(STORAGE_KEY, created);
+  localStorage.setItem(SESSION_STORAGE_KEY, created);
   return created;
 }
 
+function loadAnswerMode() {
+  const stored = localStorage.getItem(ANSWER_MODE_STORAGE_KEY);
+  return stored === "gpt" ? "gpt" : "local";
+}
+
+function saveAnswerMode(mode) {
+  selectedAnswerMode = mode === "gpt" ? "gpt" : "local";
+  localStorage.setItem(ANSWER_MODE_STORAGE_KEY, selectedAnswerMode);
+  syncModeButtons();
+}
+
+function syncModeButtons() {
+  modeButtons.forEach((button) => {
+    const mode = button.dataset.answerMode;
+    const isSelected = mode === selectedAnswerMode;
+    const isGpt = mode === "gpt";
+    button.classList.toggle("active", isSelected);
+    button.disabled = isGpt && !openaiConfigured;
+    if (isGpt && !openaiConfigured) {
+      button.title = "Set OPENAI_API_KEY and install the OpenAI SDK to enable GPT mode.";
+    } else {
+      button.title = "";
+    }
+  });
+}
+
 function updateSessionLabel() {
-  sessionLabel.textContent = currentSessionId;
+  sessionLabel.textContent = "";
 }
 
 function resetComposerState() {
@@ -40,7 +70,7 @@ function resetComposerState() {
 
 function switchToNewSession() {
   currentSessionId = `web-${Date.now()}`;
-  localStorage.setItem(STORAGE_KEY, currentSessionId);
+  localStorage.setItem(SESSION_STORAGE_KEY, currentSessionId);
   currentMessages = [];
   resetComposerState();
   renderTranscript();
@@ -246,6 +276,19 @@ function autoResizePrompt(textarea) {
   textarea.style.overflowY = textarea.scrollHeight > maxHeight ? "auto" : "hidden";
 }
 
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = String(reader.result || "");
+      const base64 = result.includes(",") ? result.split(",")[1] : result;
+      resolve(base64);
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
 function renderAttachmentSummary(container) {
   container.innerHTML = "";
   attachedImages.forEach((image) => {
@@ -276,7 +319,7 @@ function buildActivePromptNode() {
   const textarea = document.createElement("textarea");
   textarea.className = "prompt-textarea";
   textarea.rows = 1;
-  textarea.placeholder = "Describe the control problem, diagram, or formula you want help with.";
+  textarea.placeholder = "";
   textarea.value = activePromptText;
   textarea.addEventListener("input", (event) => {
     activePromptText = event.target.value;
@@ -294,7 +337,7 @@ function buildActivePromptNode() {
 
   const fileLabel = document.createElement("label");
   fileLabel.className = "file-trigger";
-  fileLabel.textContent = "Attach images";
+  fileLabel.textContent = "A";
 
   const fileInput = document.createElement("input");
   fileInput.type = "file";
@@ -307,7 +350,6 @@ function buildActivePromptNode() {
       files.map(async (file) => ({
         name: file.name,
         content: await fileToBase64(file),
-        previewUrl: URL.createObjectURL(file),
       }))
     );
     renderTranscript();
@@ -316,12 +358,12 @@ function buildActivePromptNode() {
 
   const hint = document.createElement("span");
   hint.className = "tool-hint";
-  hint.textContent = "Enter to run";
+  hint.textContent = selectedAnswerMode === "gpt" ? "GPT" : "Local";
 
   const sendButton = document.createElement("button");
   sendButton.type = "button";
   sendButton.className = "send-button";
-  sendButton.textContent = "Run";
+  sendButton.textContent = "R";
   sendButton.addEventListener("click", askQuestion);
 
   controls.appendChild(fileLabel);
@@ -356,13 +398,7 @@ function buildActivePromptNode() {
 
 function renderTranscript() {
   transcript.innerHTML = "";
-
-  if (!currentMessages.length) {
-    const emptyState = document.createElement("div");
-    emptyState.className = "transcript-empty";
-    emptyState.innerHTML = `<p class="prompt-line">&gt;&gt; Ask your first question.</p>`;
-    transcript.appendChild(emptyState);
-  } else {
+  if (currentMessages.length) {
     currentMessages.forEach((message) => {
       const row = document.createElement("article");
       row.className = `message-row ${message.role}`;
@@ -397,61 +433,7 @@ function renderTranscript() {
 function renderList(node, items, renderer) {
   node.innerHTML = "";
   items.forEach((item) => {
-    const child = renderer(item);
-    node.appendChild(child);
-  });
-}
-
-async function loadHealth() {
-  try {
-    const response = await fetch("/health");
-    const payload = await response.json();
-    const servicesReady = payload.ollama_reachable && payload.qdrant_reachable;
-    healthPill.textContent = servicesReady ? "Ollama + Qdrant ready" : "Service check incomplete";
-    healthPill.className = servicesReady ? "status-pill ok" : "status-pill warn";
-    modelPill.textContent = `Active runtime model: ${payload.recommended_model}`;
-    const collections = (payload.indexed_collections || []).join(", ") || "none yet";
-    knowledgeDir.textContent = `Knowledge directory: ${payload.knowledge_dir} | units: ${payload.total_units} | collections: ${collections}`;
-  } catch (error) {
-    healthPill.textContent = "Health check failed";
-    healthPill.className = "status-pill warn";
-    modelPill.textContent = String(error);
-  }
-}
-
-async function ingestKnowledge() {
-  ingestOutput.textContent = "Rebuilding the local index...";
-  try {
-    const response = await fetch("/ingest", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        force_full_rebuild: true,
-        rebuild_scope: "core",
-        include_silver: true,
-      }),
-    });
-    const payload = await response.json();
-    if (!response.ok) {
-      throw new Error(payload.detail || "Indexing failed");
-    }
-    ingestOutput.textContent = JSON.stringify(payload, null, 2);
-    await loadHealth();
-  } catch (error) {
-    ingestOutput.textContent = `Indexing failed: ${error}`;
-  }
-}
-
-function fileToBase64(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      const result = String(reader.result || "");
-      const base64 = result.includes(",") ? result.split(",")[1] : result;
-      resolve(base64);
-    };
-    reader.onerror = reject;
-    reader.readAsDataURL(file);
+    node.appendChild(renderer(item));
   });
 }
 
@@ -495,6 +477,7 @@ function updateDeveloperPanel(payload) {
     li.textContent = step;
     return li;
   });
+
   renderList(citationsOutput, payload.citations || [], (citation) => {
     const li = document.createElement("li");
     const location = citation.page_or_slide ? ` page/slide ${citation.page_or_slide}` : "";
@@ -502,9 +485,57 @@ function updateDeveloperPanel(payload) {
     li.textContent = `${citation.source_family}${problemTag} | ${citation.source_path}${location} | score=${citation.score}`;
     return li;
   });
+
   const verificationText = payload.verification_used ? "verification used" : "no verification layer";
-  modelPill.textContent = `Model used: ${payload.model_name} | confidence: ${payload.confidence} | ${verificationText}`;
+  modelPill.textContent = `Mode: ${payload.answer_mode || selectedAnswerMode} | model: ${payload.model_name} | confidence: ${payload.confidence} | ${verificationText}`;
   timingOutput.textContent = formatTiming(payload.timing || {});
+}
+
+async function loadHealth() {
+  try {
+    const response = await fetch("/health");
+    const payload = await response.json();
+    const localReady = payload.ollama_reachable && payload.qdrant_reachable;
+    openaiConfigured = Boolean(payload.openai_configured);
+    if (selectedAnswerMode === "gpt" && !openaiConfigured) {
+      saveAnswerMode("local");
+    } else {
+      syncModeButtons();
+    }
+    healthPill.textContent = localReady ? "Local path ready" : "Local path incomplete";
+    healthPill.className = localReady ? "status-pill ok" : "status-pill warn";
+    const gptLabel = openaiConfigured ? ` | GPT: ${payload.openai_model}` : " | GPT unavailable";
+    modelPill.textContent = `Local: ${payload.recommended_model}${gptLabel}`;
+    const collections = (payload.indexed_collections || []).join(", ") || "none yet";
+    knowledgeDir.textContent = `Knowledge directory: ${payload.knowledge_dir} | units: ${payload.total_units} | collections: ${collections}`;
+  } catch (error) {
+    healthPill.textContent = "Health check failed";
+    healthPill.className = "status-pill warn";
+    modelPill.textContent = String(error);
+  }
+}
+
+async function ingestKnowledge() {
+  ingestOutput.textContent = "Rebuilding the local index...";
+  try {
+    const response = await fetch("/ingest", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        force_full_rebuild: true,
+        rebuild_scope: "core",
+        include_silver: true,
+      }),
+    });
+    const payload = await response.json();
+    if (!response.ok) {
+      throw new Error(payload.detail || "Indexing failed");
+    }
+    ingestOutput.textContent = JSON.stringify(payload, null, 2);
+    await loadHealth();
+  } catch (error) {
+    ingestOutput.textContent = `Indexing failed: ${error}`;
+  }
 }
 
 function upsertPendingAssistant(content) {
@@ -520,6 +551,10 @@ function upsertPendingAssistant(content) {
 async function askQuestion() {
   const message = activePromptText.trim();
   if (!message) return;
+  if (selectedAnswerMode === "gpt" && !openaiConfigured) {
+    upsertPendingAssistant("## Request Failed\n\nGPT mode is not configured on this machine.");
+    return;
+  }
 
   const imagesToSend = [...attachedImages];
   const imageMarker = imagesToSend.length
@@ -553,6 +588,7 @@ async function askQuestion() {
         session_id: currentSessionId,
         preferred_language: "english",
         mode: "learning",
+        answer_mode: selectedAnswerMode,
         images: imagesToSend.map((image) => image.content),
         image_names: imagesToSend.map((image) => image.name),
       }),
@@ -594,6 +630,17 @@ function toggleDevPanel(forceOpen) {
   devPanel.setAttribute("aria-hidden", String(!shouldOpen));
 }
 
+modeButtons.forEach((button) => {
+  button.addEventListener("click", () => {
+    const requestedMode = button.dataset.answerMode === "gpt" ? "gpt" : "local";
+    if (requestedMode === "gpt" && !openaiConfigured) {
+      return;
+    }
+    saveAnswerMode(requestedMode);
+    renderTranscript();
+  });
+});
+
 document.getElementById("refresh-health").addEventListener("click", loadHealth);
 document.getElementById("run-ingest").addEventListener("click", ingestKnowledge);
 document.getElementById("new-session").addEventListener("click", switchToNewSession);
@@ -608,6 +655,7 @@ document.addEventListener("keydown", (event) => {
   }
 });
 
+syncModeButtons();
 updateSessionLabel();
 loadHealth();
 loadSessionHistory();

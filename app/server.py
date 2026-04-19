@@ -1,11 +1,13 @@
 from __future__ import annotations
+
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from app.config import KNOWLEDGE_DIR, STATIC_DIR
+from app.config import KNOWLEDGE_DIR, OPENAI_MODEL, STATIC_DIR
+from app.openai_client import OpenAIClient
 from app.runtime import build_runtime_profile
 from app.schemas import (
     ChatRequest,
@@ -21,21 +23,29 @@ from app.schemas import (
 from app.session_store import SessionStore
 from app.solver import ControlSystemAssistant, PipelineExecutionError
 
-app = FastAPI(title="Offline Control System Assistant", version="0.2.0")
+app = FastAPI(title="Offline Control System Assistant", version="0.3.0")
 
 assistant = ControlSystemAssistant()
 knowledge_store = assistant.store
 session_store = SessionStore()
+openai_client = OpenAIClient()
 
 
 @app.get("/health", response_model=HealthResponse)
 def health() -> HealthResponse:
     runtime = build_runtime_profile(refresh=True)
+    openai_configured, _ = openai_client.available()
+    available_answer_modes = ["local"]
+    if openai_configured:
+        available_answer_modes.append("gpt")
     return HealthResponse(
         status="ok",
         knowledge_dir=str(KNOWLEDGE_DIR.resolve()),
         ollama_reachable=runtime.ollama_reachable,
         qdrant_reachable=knowledge_store.qdrant_reachable(),
+        openai_configured=openai_configured,
+        openai_model=OPENAI_MODEL if openai_configured else "",
+        available_answer_modes=available_answer_modes,
         installed_models=runtime.installed_models,
         recommended_model=runtime.recommended_model,
         indexed_collections=knowledge_store.indexed_collections(),
@@ -68,6 +78,7 @@ def chat(request: ChatRequest) -> ChatResponse:
             request.session_id,
             preferred_language=request.preferred_language,
             mode=request.mode,
+            answer_mode=request.answer_mode,
             images=request.images,
             image_names=request.image_names,
         )
@@ -81,6 +92,7 @@ def chat(request: ChatRequest) -> ChatResponse:
             "[chat-timing] "
             f"session={request.session_id} "
             f"mode={request.mode} "
+            f"answer_mode={response.answer_mode} "
             f"images={len(request.images)} "
             f"model={response.model_name} "
             f"total_ms={response.timing.total_duration_ms} "
@@ -100,7 +112,6 @@ def chat(request: ChatRequest) -> ChatResponse:
                 f"{request.message}\n"
                 f"[Attached images: {', '.join(request.image_names)}]"
             )
-
         session_store.append_exchange(
             request.session_id,
             user_message=user_message_for_history,
@@ -119,6 +130,7 @@ def chat(request: ChatRequest) -> ChatResponse:
                 "[chat-timing-error] "
                 f"session={request.session_id} "
                 f"mode={request.mode} "
+                f"answer_mode={request.answer_mode} "
                 f"images={len(request.images)} "
                 f"failed_stage={exc.timing_metadata.get('failed_stage', 'unknown')} "
                 f"path={exc.timing_metadata.get('path_type', 'unknown')} "
@@ -153,6 +165,7 @@ def run_eval(request: EvalRequest) -> EvalResponse:
             session_id=f"eval:{case.case_id}",
             preferred_language="english",
             mode="learning" if request.use_solution_verification else "practice",
+            answer_mode="local",
         )
         top_citation = response.citations[0].source_path if response.citations else None
         results.append(

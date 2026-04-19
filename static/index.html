@@ -14,26 +14,26 @@
           <span id="session-label" class="session-label"></span>
         </div>
         <div class="window-actions">
-          <button id="new-session" class="ghost-button" type="button">New Session</button>
+          <div class="mode-toggle" role="group" aria-label="Answer mode">
+            <button class="mode-button active" data-answer-mode="local" type="button">L</button>
+            <button class="mode-button" data-answer-mode="gpt" type="button">G</button>
+          </div>
+          <button id="new-session" class="ghost-button" type="button">Clear</button>
           <button id="toggle-dev-panel" class="ghost-button" type="button" aria-expanded="false">
-            Developer
+            Help
           </button>
         </div>
       </header>
 
       <section class="command-window">
-        <div id="transcript" class="transcript" aria-live="polite">
-          <div class="transcript-empty">
-            <p class="prompt-line">&gt;&gt; Ask your first question.</p>
-          </div>
-        </div>
+        <div id="transcript" class="transcript" aria-live="polite"></div>
       </section>
     </main>
 
     <aside id="dev-panel" class="dev-panel" aria-hidden="true">
       <div class="dev-panel-header">
         <div>
-          <h2>Developer Panel</h2>
+          <h2>Help</h2>
         </div>
         <button id="close-dev-panel" class="ghost-button" type="button">Close</button>
       </div>

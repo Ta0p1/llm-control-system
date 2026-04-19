@@ -1,11 +1,14 @@
 # Offline Control System Assistant
 
-An offline control-systems study and solving assistant built around `Qwen + Ollama + Qdrant + LangGraph + local math tools`.
+An offline-first control-systems study and solving assistant built around `Qwen + Ollama + Qdrant + LangGraph + local math tools`, with an optional OpenAI-backed GPT mode.
 
 ## What This Version Does
 
 - Defaults to English answers
 - Supports image attachments for problem screenshots
+- Supports two explicit answer paths in the UI:
+  - `Local`: fully local Ollama generation + local embeddings
+  - `GPT`: OpenAI generation + OpenAI embeddings, still grounded in the same local corpus and local math tools
 - Indexes `knowledge/` into layered collections:
   - `theory_gold`
   - `problem_gold`
@@ -39,6 +42,17 @@ An offline control-systems study and solving assistant built around `Qwen + Olla
   - `scipy`
   - `python-control`
 
+## Optional GPT Mode
+
+When you explicitly switch the UI to `GPT`, the app uses:
+
+- generation / vision / planning: `OPENAI_MODEL` (default `gpt-5.4`)
+- embeddings: `OPENAI_EMBED_MODEL` (default `text-embedding-3-large`)
+- vector store: local `Qdrant`
+- tools: the same local `sympy`, `scipy`, and `python-control`
+
+This keeps retrieval grounded in your local documents while upgrading the model path for questions where you want stronger online reasoning or vision.
+
 ## Important Defaults
 
 - Raw final-test PDFs are not ingested directly into the main gold collections.
@@ -65,6 +79,16 @@ $env:ENABLE_DOCLING = "1"
 python -m pip install -r requirements.txt
 ```
 
+4. Optional: enable GPT mode by configuring OpenAI on the server side only:
+
+```powershell
+$env:OPENAI_API_KEY = "sk-..."
+$env:OPENAI_MODEL = "gpt-5.4"
+$env:OPENAI_EMBED_MODEL = "text-embedding-3-large"
+```
+
+If your account exposes a different GPT alias, set `OPENAI_MODEL` to that alias instead.
+
 ## Start
 
 ```powershell
@@ -74,6 +98,8 @@ python -m pip install -r requirements.txt
 The app runs at [http://127.0.0.1:8000](http://127.0.0.1:8000).
 `main` now defaults to `qwen3:8b` for text and `qwen2.5vl:7b` for image questions.
 The `qwen3.5:9b` experiment is preserved on branch `codex/qwen35-9b-runtime-experiment`.
+
+`Local` remains the default answer mode. `GPT` only appears in the UI when the OpenAI SDK is installed and `OPENAI_API_KEY` is configured.
 
 The UI now supports local LaTeX-style math rendering. When writing formulas, prefer:
 
@@ -89,6 +115,16 @@ Windows-first desktop mode is also available through `pywebview`.
 ```
 
 This starts the local FastAPI server and opens the assistant in a native desktop window instead of your browser.
+
+## Runtime Modes
+
+- `Local`
+  - keeps the original local-only workflow
+  - local generation, local image parsing, local embeddings
+- `GPT`
+  - uses OpenAI generation for image understanding, planning, and final answer composition
+  - uses OpenAI embeddings in a separate Qdrant embedding space
+  - still relies on the same local document corpus and local math tools
 
 ## UI Mode
 
@@ -118,6 +154,7 @@ It includes:
 Returns:
 - Ollama connectivity
 - Qdrant availability
+- whether OpenAI GPT mode is configured
 - installed models
 - required runtime model
 - indexed collections
@@ -144,7 +181,8 @@ Example:
   "message": "For a standard second-order system, how do I estimate peak time and settling time from zeta and wn?",
   "session_id": "web",
   "preferred_language": "english",
-  "mode": "learning"
+  "mode": "learning",
+  "answer_mode": "local"
 }
 ```
 

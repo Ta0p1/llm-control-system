@@ -18,6 +18,9 @@ class HealthResponse(BaseModel):
     knowledge_dir: str
     ollama_reachable: bool
     qdrant_reachable: bool
+    openai_configured: bool = False
+    openai_model: str = ""
+    available_answer_modes: list[str] = Field(default_factory=lambda: ["local"])
     installed_models: list[str]
     recommended_model: str
     indexed_collections: list[str] = Field(default_factory=list)
@@ -89,6 +92,7 @@ class ChatRequest(BaseModel):
     session_id: str = "default"
     preferred_language: str = "english"
     mode: Literal["learning", "practice", "concept"] = "learning"
+    answer_mode: Literal["local", "gpt"] = "local"
     images: list[str] = Field(default_factory=list)
     image_names: list[str] = Field(default_factory=list)
     attachments: list[str] = Field(default_factory=list)
@@ -101,6 +105,7 @@ class ChatResponse(BaseModel):
     used_tools: list[str]
     confidence: float
     model_name: str
+    answer_mode: Literal["local", "gpt"] = "local"
     retrieval_plan: RetrievalPlan
     verification_used: bool = False
     evidence_groups: list[EvidenceGroup] = Field(default_factory=list)

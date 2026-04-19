@@ -17,6 +17,7 @@ from app.config import (
     DENSE_CANDIDATES,
     EMBED_FALLBACK_MODEL,
     EMBED_MODEL,
+    OPENAI_EMBED_MODEL,
     KNOWLEDGE_DIR,
     LEXICAL_CANDIDATES,
     PAIR_BOOST,
@@ -25,6 +26,7 @@ from app.config import (
 )
 from app.extractors import SUPPORTED_EXTENSIONS, build_document_units, load_teacher_notes
 from app.ollama_client import OllamaClient
+from app.openai_client import OpenAIClient
 from app.schemas import DocumentUnit, EvalCase, FileIngestStatus, IngestResponse, ProblemPairRecord, RetrievalHit
 
 
@@ -39,6 +41,7 @@ class KnowledgeStore:
         self.db_path = db_path
         self.knowledge_dir = knowledge_dir
         self.ollama = OllamaClient()
+        self.openai = OpenAIClient()
         self.qdrant = QdrantClient(path=str(QDRANT_PATH)) if enable_vector_store else None
         self._ensure_schema()
         atexit.register(self.close)
@@ -79,6 +82,16 @@ class KnowledgeStore:
                     text TEXT NOT NULL,
                     excerpt TEXT NOT NULL,
                     metadata_json TEXT NOT NULL,
+                    FOREIGN KEY(file_path) REFERENCES documents(file_path) ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS vector_indices (
+                    file_path TEXT NOT NULL,
+                    provider TEXT NOT NULL,
+                    embed_model TEXT NOT NULL,
+                    file_hash TEXT NOT NULL,
+                    indexed_at TEXT NOT NULL,
+                    PRIMARY KEY (file_path, provider),
                     FOREIGN KEY(file_path) REFERENCES documents(file_path) ON DELETE CASCADE
                 );
                 """
@@ -250,11 +263,20 @@ class KnowledgeStore:
         chapter: str | None = None,
         problem_id: str | None = None,
         prefer_pair_keys: list[str] | None = None,
+        provider: str = "local",
     ) -> list[RetrievalHit]:
         source_families = source_families or CORE_COLLECTIONS
         prefer_pair_keys = prefer_pair_keys or []
-        query_embedding = self._embed_texts([query])[0]
-        dense_hits = self._dense_candidates(query_embedding, source_families, chapter=chapter, problem_id=problem_id)
+        if provider == "openai":
+            self._ensure_provider_indexes("openai", source_families)
+        query_embedding = self._embed_texts([query], provider=provider)[0]
+        dense_hits = self._dense_candidates(
+            query_embedding,
+            source_families,
+            chapter=chapter,
+            problem_id=problem_id,
+            provider=provider,
+        )
         lexical_hits = self._lexical_candidates(query, source_families, chapter=chapter, problem_id=problem_id)
 
         merged: dict[str, RetrievalHit] = {}
@@ -436,7 +458,7 @@ class KnowledgeStore:
         if self.qdrant is None:
             raise RuntimeError("Vector store is disabled for this KnowledgeStore instance.")
         self._delete_existing_points(file_path)
-        self._ensure_collection(collection_name, len(embeddings[0]))
+        self._ensure_collection(self._vector_collection_name(collection_name, "local"), len(embeddings[0]))
 
         points = []
         for unit, embedding in zip(units, embeddings):
@@ -457,11 +479,12 @@ class KnowledgeStore:
             }
             points.append(qmodels.PointStruct(id=unit.point_id, vector=embedding, payload=payload))
 
-        self.qdrant.upsert(collection_name=collection_name, points=points)
+        self.qdrant.upsert(collection_name=self._vector_collection_name(collection_name, "local"), points=points)
 
         with self._connect() as conn:
             conn.execute("DELETE FROM units WHERE file_path = ?", (file_path,))
             conn.execute("DELETE FROM documents WHERE file_path = ?", (file_path,))
+            conn.execute("DELETE FROM vector_indices WHERE file_path = ?", (file_path,))
             sample = units[0]
             conn.execute(
                 """
@@ -504,6 +527,20 @@ class KnowledgeStore:
                     for unit in units
                 ],
             )
+            conn.execute(
+                """
+                INSERT INTO vector_indices (file_path, provider, embed_model, file_hash, indexed_at)
+                VALUES (?, ?, ?, ?, datetime('now'))
+                """,
+                (file_path, "local", EMBED_MODEL, file_hash),
+            )
+        self._maybe_index_openai_vectors(
+            file_path,
+            collection_name,
+            units,
+            file_hash,
+            raise_on_error=False,
+        )
 
     def _delete_existing_points(self, file_path: str) -> None:
         if self.qdrant is None:
@@ -519,10 +556,15 @@ class KnowledgeStore:
         for collection_name, point_ids in ids_by_collection.items():
             if not point_ids:
                 continue
-            self.qdrant.delete(
-                collection_name=collection_name,
-                points_selector=qmodels.PointIdsList(points=point_ids),
-            )
+            for provider in ("local", "openai"):
+                vector_collection_name = self._vector_collection_name(collection_name, provider)
+                try:
+                    self.qdrant.delete(
+                        collection_name=vector_collection_name,
+                        points_selector=qmodels.PointIdsList(points=point_ids),
+                    )
+                except Exception:
+                    continue
 
     def _ensure_collection(self, collection_name: str, vector_size: int) -> None:
         if self.qdrant is None:
@@ -547,6 +589,7 @@ class KnowledgeStore:
         *,
         chapter: str | None = None,
         problem_id: str | None = None,
+        provider: str = "local",
     ) -> dict[str, float]:
         if self.qdrant is None:
             raise RuntimeError("Vector store is disabled for this KnowledgeStore instance.")
@@ -555,13 +598,16 @@ class KnowledgeStore:
             if collection_name not in self.indexed_collections():
                 continue
             query_filter = self._build_filter(chapter=chapter, problem_id=problem_id)
-            response = self.qdrant.query_points(
-                collection_name=collection_name,
-                query=query_embedding,
-                query_filter=query_filter,
-                limit=DENSE_CANDIDATES,
-                with_payload=False,
-            )
+            try:
+                response = self.qdrant.query_points(
+                    collection_name=self._vector_collection_name(collection_name, provider),
+                    query=query_embedding,
+                    query_filter=query_filter,
+                    limit=DENSE_CANDIDATES,
+                    with_payload=False,
+                )
+            except Exception:
+                continue
             for hit in response.points:
                 scores[str(hit.id)] = max(scores.get(str(hit.id), 0.0), float(hit.score))
         return scores
@@ -613,11 +659,130 @@ class KnowledgeStore:
             return None
         return qmodels.Filter(must=conditions)
 
-    def _embed_texts(self, texts: list[str]) -> list[list[float]]:
+    def _embed_texts(self, texts: list[str], *, provider: str = "local") -> list[list[float]]:
+        if provider == "openai":
+            return self.openai.embeddings(texts, model=OPENAI_EMBED_MODEL)
         try:
             return self.ollama.embeddings(texts, model=EMBED_MODEL)
         except Exception:
             return self.ollama.embeddings(texts, model=EMBED_FALLBACK_MODEL)
+
+    def _vector_collection_name(self, collection_name: str, provider: str) -> str:
+        return collection_name if provider == "local" else f"{collection_name}__{provider}"
+
+    def _maybe_index_openai_vectors(
+        self,
+        file_path: str,
+        collection_name: str,
+        units: list[DocumentUnit],
+        file_hash: str,
+        *,
+        raise_on_error: bool,
+    ) -> None:
+        available, _ = self.openai.available()
+        if not available or self.qdrant is None:
+            if raise_on_error and not available:
+                available, detail = self.openai.available()
+                raise RuntimeError(detail)
+            return
+        try:
+            embeddings = self._embed_texts([unit.text for unit in units], provider="openai")
+        except Exception:
+            if raise_on_error:
+                raise
+            return
+        vector_collection_name = self._vector_collection_name(collection_name, "openai")
+        self._ensure_collection(vector_collection_name, len(embeddings[0]))
+        points = []
+        for unit, embedding in zip(units, embeddings):
+            payload = {
+                "file_path": unit.file_path,
+                "source_family": unit.source_family,
+                "source_quality": unit.source_quality,
+                "chapter": unit.chapter,
+                "problem_id": unit.problem_id,
+                "pair_key": unit.pair_key,
+                "title": unit.title,
+                "page_or_slide": unit.page_or_slide,
+                "chunk_index": unit.chunk_index,
+                "text": unit.text,
+                "excerpt": unit.excerpt,
+                "metadata": unit.metadata,
+                "is_answer_like": unit.is_answer_like,
+            }
+            points.append(qmodels.PointStruct(id=unit.point_id, vector=embedding, payload=payload))
+        self.qdrant.upsert(collection_name=vector_collection_name, points=points)
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO vector_indices (file_path, provider, embed_model, file_hash, indexed_at)
+                VALUES (?, ?, ?, ?, datetime('now'))
+                ON CONFLICT(file_path, provider) DO UPDATE SET
+                    embed_model = excluded.embed_model,
+                    file_hash = excluded.file_hash,
+                    indexed_at = excluded.indexed_at
+                """,
+                (file_path, "openai", OPENAI_EMBED_MODEL, file_hash),
+            )
+
+    def _ensure_provider_indexes(self, provider: str, source_families: list[str]) -> None:
+        if provider != "openai" or self.qdrant is None:
+            return
+        available, detail = self.openai.available()
+        if not available:
+            raise RuntimeError(detail)
+        placeholders = ",".join("?" for _ in source_families)
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT DISTINCT d.file_path, d.file_hash
+                FROM documents d
+                JOIN units u ON u.file_path = d.file_path
+                WHERE u.collection_name IN ({placeholders})
+                """,
+                list(source_families),
+            ).fetchall()
+            index_rows = {
+                row["file_path"]: row
+                for row in conn.execute(
+                    "SELECT file_path, embed_model, file_hash FROM vector_indices WHERE provider = 'openai'"
+                ).fetchall()
+            }
+
+        for row in rows:
+            file_path = row["file_path"]
+            existing = index_rows.get(file_path)
+            if (
+                existing
+                and existing["embed_model"] == OPENAI_EMBED_MODEL
+                and existing["file_hash"] == row["file_hash"]
+            ):
+                continue
+            with self._connect() as conn:
+                unit_rows = conn.execute(
+                    """
+                    SELECT point_id, file_path, collection_name, chapter, problem_id, pair_key, title,
+                           source_quality, page_or_slide, chunk_index, text, excerpt, metadata_json
+                    FROM units
+                    WHERE file_path = ?
+                    ORDER BY collection_name, chunk_index
+                    """,
+                    (file_path,),
+                ).fetchall()
+            units = [self._row_to_unit(item) for item in unit_rows]
+            if not units:
+                continue
+            grouped_units: dict[str, list[DocumentUnit]] = defaultdict(list)
+            for unit in units:
+                grouped_units[unit.source_family].append(unit)
+            for collection_name, collection_units in grouped_units.items():
+                self._maybe_index_openai_vectors(
+                    file_path,
+                    collection_name,
+                    collection_units,
+                    row["file_hash"],
+                    raise_on_error=True,
+                )
 
     @staticmethod
     def _row_to_unit(row: sqlite3.Row) -> DocumentUnit:
