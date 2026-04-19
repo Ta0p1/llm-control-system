@@ -30,3 +30,10 @@ knowledge/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Local package caches used to vendor frontend math assets
+.npm-cache/
+.vendor-katex/
+
+# Temporary local extraction scratch space
+tmp_pdf_extract/

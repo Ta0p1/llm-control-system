@@ -75,6 +75,30 @@ The app runs at [http://127.0.0.1:8000](http://127.0.0.1:8000).
 `main` now defaults to `qwen3:8b` for text and `qwen2.5vl:7b` for image questions.
 The `qwen3.5:9b` experiment is preserved on branch `codex/qwen35-9b-runtime-experiment`.
 
+The UI now supports local LaTeX-style math rendering. When writing formulas, prefer:
+
+- inline math: `$...$`
+- block math: `$$...$$`
+
+## Desktop App
+
+Windows-first desktop mode is also available through `pywebview`.
+
+```powershell
+.\start_desktop.ps1
+```
+
+This starts the local FastAPI server and opens the assistant in a native desktop window instead of your browser.
+
+## UI Mode
+
+The main UI is designed like a MATLAB Command Window:
+
+- the central view only shows user inputs and assistant outputs
+- conversation history is restored from local session files in `data/sessions/`
+- health, ingest, timing, and citation details live in a hidden Developer panel
+- open the Developer panel with the on-screen button or `Ctrl+Shift+D`
+
 ## Text-Only Diagram Input Guide
 
 If your real usage environment cannot upload images and you must describe figures in text, use:

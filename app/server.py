@@ -16,13 +16,16 @@ from app.schemas import (
     HealthResponse,
     IngestRequest,
     IngestResponse,
+    SessionHistoryResponse,
 )
+from app.session_store import SessionStore
 from app.solver import ControlSystemAssistant, PipelineExecutionError
 
 app = FastAPI(title="Offline Control System Assistant", version="0.2.0")
 
 assistant = ControlSystemAssistant()
 knowledge_store = assistant.store
+session_store = SessionStore()
 
 
 @app.get("/health", response_model=HealthResponse)
@@ -91,6 +94,18 @@ def chat(request: ChatRequest) -> ChatResponse:
             f"stages=[{stage_summary}] "
             f"models=[{model_summary}]"
         )
+        user_message_for_history = request.message
+        if request.image_names:
+            user_message_for_history = (
+                f"{request.message}\n"
+                f"[Attached images: {', '.join(request.image_names)}]"
+            )
+
+        session_store.append_exchange(
+            request.session_id,
+            user_message=user_message_for_history,
+            assistant_message=response.answer,
+        )
         return response
     except Exception as exc:
         if isinstance(exc, PipelineExecutionError):
@@ -113,6 +128,16 @@ def chat(request: ChatRequest) -> ChatResponse:
                 f"error={exc}"
             )
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.get("/session/{session_id}/history", response_model=SessionHistoryResponse)
+def session_history(session_id: str) -> SessionHistoryResponse:
+    return session_store.load(session_id)
+
+
+@app.post("/session/{session_id}/clear", response_model=SessionHistoryResponse)
+def clear_session(session_id: str) -> SessionHistoryResponse:
+    return session_store.clear(session_id)
 
 
 @app.post("/eval/run", response_model=EvalResponse)

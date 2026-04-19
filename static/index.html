@@ -3,80 +3,78 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Control System Assistant</title>
+    <title>Workspace</title>
     <link rel="stylesheet" href="/static/styles.css" />
+    <link rel="stylesheet" href="/static/vendor/katex/katex.min.css" />
   </head>
   <body>
-    <div class="background-glow"></div>
-    <main class="shell">
-      <section class="hero-card">
-        <p class="eyebrow">Offline Qwen Workspace</p>
-        <h1>Control System Assistant</h1>
-        <p class="hero-copy">
-          An offline study assistant for control systems. It scans the materials in
-          <code>knowledge/</code>, builds layered theory/problem/solution indexes, and uses
-          Local Qwen models plus math tools for verified step-by-step solutions.
-        </p>
+    <main class="matlab-shell">
+      <header class="window-bar">
+        <div class="window-title-group">
+          <span id="session-label" class="session-label"></span>
+        </div>
+        <div class="window-actions">
+          <button id="new-session" class="ghost-button" type="button">New Session</button>
+          <button id="toggle-dev-panel" class="ghost-button" type="button" aria-expanded="false">
+            Developer
+          </button>
+        </div>
+      </header>
+
+      <section class="command-window">
+        <div id="transcript" class="transcript" aria-live="polite">
+          <div class="transcript-empty">
+            <p class="prompt-line">&gt;&gt; Ask your first question.</p>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <aside id="dev-panel" class="dev-panel" aria-hidden="true">
+      <div class="dev-panel-header">
+        <div>
+          <h2>Developer Panel</h2>
+        </div>
+        <button id="close-dev-panel" class="ghost-button" type="button">Close</button>
+      </div>
+
+      <section class="dev-card">
+        <h3>Status</h3>
         <div class="status-row">
           <div class="status-pill" id="health-pill">Waiting for health check</div>
           <div class="status-pill muted" id="model-pill">Model not detected yet</div>
         </div>
-      </section>
-
-      <section class="control-panel">
-        <div class="panel-card">
-          <h2>Knowledge Base</h2>
-          <p id="knowledge-dir">Checking local knowledge directory...</p>
-          <div class="button-row">
-            <button id="refresh-health">Refresh Status</button>
-            <button id="run-ingest" class="secondary">Rebuild Index</button>
-          </div>
-          <pre id="ingest-output">Indexing has not been run yet.</pre>
-        </div>
-
-        <div class="panel-card">
-          <h2>Ask a Question</h2>
-          <label for="question">Question</label>
-          <textarea
-            id="question"
-            rows="6"
-            placeholder="Example: For a standard second-order system, how do I estimate peak time and settling time from zeta and wn?"
-          ></textarea>
-          <label for="image-input">Optional image input</label>
-          <input id="image-input" type="file" accept="image/*" multiple />
-          <div id="image-preview" class="image-preview"></div>
-          <div class="button-row">
-            <button id="ask-button">Send</button>
-          </div>
+        <p id="knowledge-dir">Checking local knowledge directory...</p>
+        <div class="dev-actions">
+          <button id="refresh-health" type="button">Refresh Status</button>
+          <button id="run-ingest" class="secondary" type="button">Rebuild Index</button>
         </div>
       </section>
 
-      <section class="answer-grid">
-        <article class="answer-card">
-          <h2>Answer</h2>
-          <div id="answer-output" class="markdown-like">
-            Ask a question after indexing your material. You can also attach images.
-          </div>
-        </article>
-
-        <article class="answer-card">
-          <h2>Steps and Sources</h2>
-          <div class="meta-block">
-            <h3>Performance</h3>
-            <pre id="timing-output">Timing data will appear after you ask a question.</pre>
-          </div>
-          <div class="meta-block">
-            <h3>Reasoning Steps</h3>
-            <ol id="steps-output"></ol>
-          </div>
-          <div class="meta-block">
-            <h3>Sources</h3>
-            <ul id="citations-output"></ul>
-          </div>
-        </article>
+      <section class="dev-card">
+        <h3>Indexing Output</h3>
+        <pre id="ingest-output">Indexing has not been run yet.</pre>
       </section>
-    </main>
 
+      <section class="dev-card">
+        <h3>Performance</h3>
+        <pre id="timing-output">Timing data will appear after you ask a question.</pre>
+      </section>
+
+      <section class="dev-card">
+        <h3>Reasoning Steps</h3>
+        <ol id="steps-output"></ol>
+      </section>
+
+      <section class="dev-card">
+        <h3>Sources</h3>
+        <ul id="citations-output"></ul>
+      </section>
+    </aside>
+
+    <div id="dev-overlay" class="dev-overlay hidden"></div>
+
+    <script src="/static/vendor/katex/katex.min.js"></script>
     <script src="/static/app.js"></script>
   </body>
-  </html>
+</html>

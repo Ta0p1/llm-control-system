@@ -11,3 +11,4 @@ sympy>=1.14,<2.0
 scipy>=1.16,<2.0
 numpy>=2.3,<3.0
 control>=0.10,<1.0
+pywebview>=5.3,<6.0

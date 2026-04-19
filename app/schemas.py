@@ -107,6 +107,17 @@ class ChatResponse(BaseModel):
     timing: ChatTiming = Field(default_factory=ChatTiming)
 
 
+class SessionMessage(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str
+    created_at: str
+
+
+class SessionHistoryResponse(BaseModel):
+    session_id: str
+    messages: list[SessionMessage] = Field(default_factory=list)
+
+
 class DocumentUnit(BaseModel):
     point_id: str
     file_path: str

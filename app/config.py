@@ -13,6 +13,7 @@ SILVER_NOTES_DIR = DATA_DIR / "silver_notes"
 BENCHMARKS_DIR = DATA_DIR / "benchmarks"
 TEACHER_BATCHES_DIR = DATA_DIR / "teacher_batches"
 FINAL_BATCHES_DIR = TEACHER_BATCHES_DIR / "finals"
+SESSIONS_DIR = DATA_DIR / "sessions"
 
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
 OLLAMA_TIMEOUT_SECONDS = int(os.getenv("OLLAMA_TIMEOUT_SECONDS", "600"))
@@ -62,3 +63,4 @@ SILVER_NOTES_DIR.mkdir(parents=True, exist_ok=True)
 BENCHMARKS_DIR.mkdir(parents=True, exist_ok=True)
 TEACHER_BATCHES_DIR.mkdir(parents=True, exist_ok=True)
 FINAL_BATCHES_DIR.mkdir(parents=True, exist_ok=True)
+SESSIONS_DIR.mkdir(parents=True, exist_ok=True)

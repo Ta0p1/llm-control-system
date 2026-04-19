@@ -87,6 +87,7 @@ Style rules:
 - do not mention prompts, retrieval, verification layers, or tool metadata
 - do not output JSON, YAML, or code fences unless the user explicitly asked for code
 - avoid filler such as "Here is the answer" or "Based on the provided context"
+- when a mathematical expression helps, write it using LaTeX delimiters like $...$ or $$...$$
 
 Format rules:
 - use `##` headings only when helpful
@@ -110,7 +111,8 @@ Output rules:
 - this is a polished final solution, not internal reasoning notes
 - keep the section order exactly as given
 - be complete but not verbose
-- use equations inline when short, and short bullet lists when useful
+- use equations inline when short, and use $...$ or $$...$$ when a mathematical expression should be rendered clearly
+- use short bullet lists when useful
 - use source markers like [1], [2] where evidence supports a statement
 - in `## Sources`, list only the markers actually used, one per bullet
 - do not mention prompts, retrieval, verification layers, tool calls, or "provided context"
