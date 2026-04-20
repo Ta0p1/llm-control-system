@@ -15,6 +15,9 @@
   --shadow: 0 18px 44px rgba(41, 64, 90, 0.12);
   --mono: "Cascadia Mono", "Consolas", "Courier New", monospace;
   --ui: "Segoe UI Variable", "Segoe UI", sans-serif;
+  --chat-font-scale: 1;
+  --chat-input-font-size: calc(0.96rem * var(--chat-font-scale));
+  --chat-output-font-size: calc(0.92rem * var(--chat-font-scale));
 }
 
 * {
@@ -286,7 +289,7 @@ input {
   color: var(--user);
   white-space: pre-wrap;
   word-break: break-word;
-  font-size: 0.92rem;
+  font-size: var(--chat-output-font-size);
   line-height: 1.45;
   padding-top: 1px;
 }
@@ -295,7 +298,7 @@ input {
   max-width: none;
   color: #111111;
   font-family: var(--ui);
-  font-size: 0.92rem;
+  font-size: var(--chat-output-font-size);
   line-height: 1.42;
 }
 
@@ -348,7 +351,7 @@ input {
   background: transparent;
   padding: 5px 2px 6px;
   font-family: var(--mono);
-  font-size: 0.96rem;
+  font-size: var(--chat-input-font-size);
   line-height: 1.45;
   outline: none;
   box-shadow: none;

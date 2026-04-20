@@ -1,5 +1,10 @@
 const SESSION_STORAGE_KEY = "control-assistant-session-id";
 const ANSWER_MODE_STORAGE_KEY = "control-assistant-answer-mode";
+const CHAT_FONT_SCALE_STORAGE_KEY = "control-assistant-chat-font-scale";
+const DEFAULT_CHAT_FONT_SCALE = 1;
+const MIN_CHAT_FONT_SCALE = 0.8;
+const MAX_CHAT_FONT_SCALE = 1.5;
+const CHAT_FONT_SCALE_STEP = 0.1;
 
 const healthPill = document.getElementById("health-pill");
 const modelPill = document.getElementById("model-pill");
@@ -22,6 +27,7 @@ let pendingAssistantId = null;
 let shouldFocusPrompt = true;
 let selectedAnswerMode = loadAnswerMode();
 let openaiConfigured = false;
+let currentChatFontScale = loadChatFontScale();
 
 function loadOrCreateSessionId() {
   const existing = localStorage.getItem(SESSION_STORAGE_KEY);
@@ -40,6 +46,46 @@ function saveAnswerMode(mode) {
   selectedAnswerMode = mode === "gpt" ? "gpt" : "local";
   localStorage.setItem(ANSWER_MODE_STORAGE_KEY, selectedAnswerMode);
   syncModeButtons();
+}
+
+function clampChatFontScale(value) {
+  return Math.min(MAX_CHAT_FONT_SCALE, Math.max(MIN_CHAT_FONT_SCALE, value));
+}
+
+function loadChatFontScale() {
+  const stored = Number.parseFloat(localStorage.getItem(CHAT_FONT_SCALE_STORAGE_KEY) || "");
+  if (Number.isFinite(stored)) {
+    return clampChatFontScale(stored);
+  }
+  return DEFAULT_CHAT_FONT_SCALE;
+}
+
+function applyChatFontScale(scale) {
+  currentChatFontScale = clampChatFontScale(scale);
+  document.documentElement.style.setProperty("--chat-font-scale", currentChatFontScale.toFixed(2));
+}
+
+function saveChatFontScale(scale) {
+  applyChatFontScale(scale);
+  localStorage.setItem(CHAT_FONT_SCALE_STORAGE_KEY, currentChatFontScale.toFixed(2));
+}
+
+function adjustChatFontScale(direction) {
+  if (!Number.isFinite(direction) || direction === 0) return;
+  const nextScale = clampChatFontScale(currentChatFontScale + CHAT_FONT_SCALE_STEP * direction);
+  if (nextScale === currentChatFontScale) return;
+  saveChatFontScale(nextScale);
+  renderTranscript();
+}
+
+function isFontZoomInShortcut(event) {
+  if (!event.ctrlKey || event.altKey) return false;
+  return event.key === "=" || event.key === "+" || event.code === "NumpadAdd";
+}
+
+function isFontZoomOutShortcut(event) {
+  if (!event.ctrlKey || event.altKey) return false;
+  return event.key === "-" || event.key === "_" || event.code === "NumpadSubtract";
 }
 
 function syncModeButtons() {
@@ -652,9 +698,22 @@ document.addEventListener("keydown", (event) => {
   if (event.ctrlKey && event.shiftKey && event.key.toLowerCase() === "d") {
     event.preventDefault();
     toggleDevPanel();
+    return;
+  }
+
+  if (isFontZoomInShortcut(event)) {
+    event.preventDefault();
+    adjustChatFontScale(1);
+    return;
+  }
+
+  if (isFontZoomOutShortcut(event)) {
+    event.preventDefault();
+    adjustChatFontScale(-1);
   }
 });
 
+applyChatFontScale(currentChatFontScale);
 syncModeButtons();
 updateSessionLabel();
 loadHealth();
